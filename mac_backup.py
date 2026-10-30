@@ -13,7 +13,10 @@ FASE 1 (relevamiento):
 FASE 2 (copia, previa confirmación):
   - archivos/          -> árbol espejo relativo a ~ (para restaurar con rsync)
   - repos_pendientes/  -> copia completa (con .git) de repos sin remoto o con trabajo sin subir
-  - inventario/, REPORTE.md, reporte.json, manifest.csv, clonar_repos.sh
+  - inventario/, reporte_<fecha>.md, reporte.json, manifest.csv, checksums.sha256, clonar_repos.sh
+
+  - También: perfiles de Chrome/Brave/Edge/Firefox, historial de terminal y redes Wi-Fi (claves con --wifi-claves)
+  - Cada archivo copiado se verifica con SHA-256 y --verificar CARPETA revisa el backup completo
 
 Uso:
   python3 mac_backup.py --solo-reporte
@@ -23,6 +26,7 @@ Uso:
 import argparse
 import csv
 import fnmatch
+import hashlib
 import json
 import os
 import plistlib
@@ -34,6 +38,7 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home().resolve()
+SCRIPT_DIR = Path(__file__).resolve().parent
 TS = datetime.now().strftime("%Y%m%d_%H%M")
 
 # Carpetas pesadas / regenerables: no se recorren ni se copian
@@ -55,17 +60,51 @@ HOME_PRUNE = {
     ".vscode-server", ".gem", ".kotlin", ".konan", ".flutter", "flutter", ".config/gcloud/logs",
 }
 
-# Archivos sensibles / de configuración (se copian aunque estén trackeados)
-SENSITIVE = [
-    ".env", ".env.*", "*.env", "env.*.json", "*.properties", "*.gradle", "*.gradle.kts",
-    "*.keystore", "*.jks", "*.p12", "*.pfx", "*.pem", "*.key", "*.p8", "*.cer", "*.crt", "*.der",
-    "*.mobileprovision", "*.provisionprofile", "google-services.json", "googleservice-info.plist",
-    "*service-account*.json", "*serviceaccount*.json", "*credentials*.json", "client_secret*.json",
-    "*firebase*.json", ".firebaserc", ".npmrc", ".yarnrc", ".yarnrc.yml", "secrets.*", "*.secret",
-    "*.secrets", "*.local.json", "*.local.yml", "*.local.yaml", "settings.local.*", "config.local.*",
-    "application*.yml", "application*.yaml", "appsettings*.json", ".htpasswd", "id_rsa*", "id_ed25519*",
-    "*.ovpn", "*.kdbx", "docker-compose.override.yml", ".pgpass", "*.tfvars", "terraform.tfstate*",
+# Archivos sensibles / de configuración (se copian aunque estén trackeados).
+# (patrones, categoría, qué es / qué puede tener). El orden importa: un archivo cuenta en el primer grupo que coincide.
+SENSIBLES_INFO = [
+    ((".env", ".env.*", "*.env", "env.*.json"), "Variables de entorno",
+     "Config de apps con API keys, tokens, URLs y credenciales de base de datos o de terceros (Stripe, AWS, Firebase...)."),
+    (("*.properties", "*.gradle", "*.gradle.kts"), "Properties y Gradle",
+     "Config de Java/Android/Gradle: `local.properties` (ruta del SDK), `gradle.properties` y signing configs con "
+     "contraseñas de keystore, repositorios Maven con credenciales."),
+    (("*.keystore", "*.jks"), "Keystores de firma de apps",
+     "Almacenes de claves Java/Android para firmar APK/AAB. Si se pierden no se puede actualizar una app ya publicada."),
+    (("*.p12", "*.pfx", "*.pkcs12"), "Certificados con clave privada (firma digital)",
+     "Contenedor PKCS#12 con certificado + clave privada, protegido por contraseña. Se usa para firma digital de PDF y "
+     "documentos, certificados de cliente y firma de código (Apple/Windows)."),
+    (("*.pem", "*.key", "*.ppk", "*.pvk", "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*", "*_rsa", "*_ed25519"),
+     "Claves privadas y accesos a servidores",
+     "Claves SSH/TLS para entrar a servidores (VPS, EC2, GitHub), claves PuTTY y llaves de firma. "
+     "`id_*` también trae las `.pub` públicas."),
+    (("*.cer", "*.crt", "*.cert", "*.der", "*.p7b", "*.p7c", "*.p7s", "*.spc", "*.csr", "*.crl"),
+     "Certificados públicos y firmas",
+     "Certificados X.509, cadenas de confianza, solicitudes (CSR) y firmas separadas (`.p7s`). Son parte de la firma "
+     "digital de PDF; sin la clave privada (`.p12`/`.pfx`) no alcanzan para firmar."),
+    (("*.gpg", "*.pgp", "*.asc", "*.sig"), "Claves y firmas GPG/PGP",
+     "Claves exportadas, archivos cifrados o firmas para firmar commits/correos y verificar descargas."),
+    (("*.mobileprovision", "*.provisionprofile", "*.p8"), "Apple: provisioning y APNs",
+     "Perfiles de aprovisionamiento iOS/macOS y claves `.p8` de APNs, App Store Connect o Sign in with Apple."),
+    (("google-services.json", "googleservice-info.plist", "*firebase*.json", ".firebaserc"), "Config de Firebase/Google",
+     "IDs de proyecto y API keys de Firebase para Android/iOS; en `*firebase*.json` puede haber reglas o credenciales."),
+    (("*service-account*.json", "*serviceaccount*.json", "*credentials*.json", "client_secret*.json"),
+     "Service accounts y credenciales cloud",
+     "Claves de cuentas de servicio (GCP/Firebase) y client secrets de OAuth: acceso programático a servicios en la nube."),
+    ((".npmrc", ".yarnrc", ".yarnrc.yml"), "Tokens de gestores de paquetes",
+     "Tokens de registros npm/GitHub Packages y registros privados."),
+    (("secrets.*", "*.secret", "*.secrets", "*.local.json", "*.local.yml", "*.local.yaml", "settings.local.*", "config.local.*"),
+     "Secretos y config local",
+     "Archivos de secretos o config específica de tu máquina que normalmente no se versiona."),
+    (("application*.yml", "application*.yaml", "appsettings*.json"), "Config de apps (Spring/.NET)",
+     "Cadenas de conexión a BD, puertos y credenciales según el perfil (dev/prod)."),
+    ((".pgpass", ".htpasswd", "*.tfvars", "terraform.tfstate*", "docker-compose.override.yml", "*.ovpn"),
+     "Infra y acceso remoto",
+     "Contraseñas de Postgres/htaccess, variables y estado de Terraform (pueden traer secretos), overrides de Docker, "
+     "perfiles VPN."),
+    (("*.kdbx",), "Gestor de contraseñas",
+     "Bases de KeePass con todas tus contraseñas."),
 ]
+SENSITIVE = [pat for pats, _, _ in SENSIBLES_INFO for pat in pats]
 
 # Basura que no vale la pena copiar aunque esté ignorada
 NOISE = [".ds_store", "*.log", "*.pyc", "*.pyo", "*.class", "*.o", "*.tmp", "*.swp", "*.iml",
@@ -89,6 +128,33 @@ DOTFILES = [
     "Library/Application Support/JetBrains",  # filtrado por tamaño
     "Library/Fonts",
 ]
+
+# Historial de terminal y de herramientas de línea de comandos (relativos a ~)
+HISTORIALES = [
+    ".zsh_history", ".zhistory", ".bash_history", ".zsh_sessions", ".python_history", ".node_repl_history",
+    ".psql_history", ".mysql_history", ".sqlite_history", ".rediscli_history", ".irb_history", ".lesshst",
+    ".local/share/fish/fish_history", ".local/share/atuin",
+]
+
+# Navegadores Chromium: carpeta de datos relativa a ~
+NAVEGADORES_CHROMIUM = {
+    "Chrome": "Library/Application Support/Google/Chrome",
+    "Brave": "Library/Application Support/BraveSoftware/Brave-Browser",
+    "Edge": "Library/Application Support/Microsoft Edge",
+}
+# Archivos que se copian de cada perfil Chromium (sin cachés ni cookies)
+CHROMIUM_PERFIL = ["Bookmarks", "Preferences", "Login Data", "Login Data For Account", "Web Data", "History"]
+PROCESOS_NAVEGADOR = {"Chrome": "Google Chrome", "Brave": "Brave Browser", "Edge": "Microsoft Edge",
+                      "Firefox": "firefox"}
+
+FIREFOX_BASE = "Library/Application Support/Firefox"
+# Archivos (patrones) y carpetas que se copian de cada perfil de Firefox
+FIREFOX_PERFIL = [
+    "places.sqlite*", "favicons.sqlite*", "formhistory.sqlite*", "permissions.sqlite*", "key4.db", "logins.json",
+    "cert9.db", "pkcs11.txt", "prefs.js", "user.js", "extensions.json", "extension-settings.json",
+    "extension-preferences.json", "containers.json", "handlers.json", "search.json.mozlz4", "xulstore.json",
+]
+FIREFOX_DIRS = ["extensions", "chrome", "bookmarkbackups"]
 
 TOOLS = {
     "brew": ["brew", "--version"], "git": ["git", "--version"], "node": ["node", "-v"],
@@ -339,6 +405,22 @@ def scan(roots, skip_abs):
     return sorted(repos), sensibles
 
 
+def resumen_sensibles(sensibles):
+    """Cuenta los archivos sensibles por categoría y patrón, usando el primer grupo que coincide."""
+    grupos = [{"categoria": c, "descripcion": d, "cantidad": 0, "bytes": 0, "patrones": {}}
+              for _, c, d in SENSIBLES_INFO]
+    for p in sensibles:
+        n = p.name.lower()
+        for g, (pats, _, _) in zip(grupos, SENSIBLES_INFO):
+            hit = next((x for x in pats if fnmatch.fnmatch(n, x.lower())), None)
+            if hit:
+                g["cantidad"] += 1
+                g["bytes"] += fsize(p)
+                g["patrones"][hit] = g["patrones"].get(hit, 0) + 1
+                break
+    return [g for g in grupos if g["cantidad"]]
+
+
 def git_ignored_files(repo, max_files_dir=3000):
     o = git(repo, "ls-files", "-o", "-i", "--exclude-standard", "--directory", "-z", timeout=240)
     out, omitidos = [], []
@@ -423,25 +505,38 @@ def repo_info(repo: Path):
 
 
 # ------------------------------------------------------------------ fase 2
+def sha256_file(p, bufsize=1024 * 1024):
+    h = hashlib.sha256()
+    with open(p, "rb") as fh:
+        for chunk in iter(lambda: fh.read(bufsize), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def copy_file(src: Path, dest_root: Path, motivo, manifest, max_bytes):
     try:
         size = fsize(src)
         dst = dest_root / backup_rel(src)
         if size > max_bytes:
-            manifest.append([str(src), "", size, motivo, f"OMITIDO > {human(max_bytes)}"])
+            manifest.append([str(src), "", size, motivo, f"OMITIDO > {human(max_bytes)}", ""])
             return 0
         dst.parent.mkdir(parents=True, exist_ok=True)
+        sha_src = sha256_file(src)
         shutil.copy2(src, dst)
-        manifest.append([str(src), str(dst), size, motivo, "OK"])
+        sha_dst = sha256_file(dst)
+        if sha_src != sha_dst:
+            manifest.append([str(src), str(dst), size, motivo, "ERROR: checksum distinto (¿archivo en uso?)", ""])
+            return 0
+        manifest.append([str(src), str(dst), size, motivo, "OK", sha_dst])
         return size
     except Exception as e:
-        manifest.append([str(src), "", 0, motivo, f"ERROR: {e}"])
+        manifest.append([str(src), "", 0, motivo, f"ERROR: {e}", ""])
         return 0
 
 
-def dotfile_paths():
+def dotfile_paths(lista=None):
     out = []
-    for d in DOTFILES:
+    for d in (DOTFILES if lista is None else lista):
         p = HOME / d
         if p.is_symlink() and not p.exists():
             continue
@@ -457,26 +552,282 @@ def dotfile_paths():
     return out
 
 
+def historial_paths():
+    return dotfile_paths(HISTORIALES)
+
+
+def _perfiles_chromium(base: Path):
+    return [d for d in sorted(base.iterdir()) if d.is_dir() and (d.name == "Default" or d.name.startswith("Profile "))]
+
+
+def _nombre_perfil_chromium(base: Path, dirname):
+    try:
+        info = json.loads((base / "Local State").read_text(encoding="utf-8"))["profile"]["info_cache"][dirname]
+        extra = " · ".join(x for x in (info.get("name"), info.get("user_name")) if x)
+        return f"{dirname} ({extra})" if extra else dirname
+    except Exception:
+        return dirname
+
+
+def navegador_paths():
+    """Perfiles y archivos a copiar de Chrome/Brave/Edge/Firefox: {navegador: {perfiles, archivos}}."""
+    res = {}
+    for nombre, rel in NAVEGADORES_CHROMIUM.items():
+        base = HOME / rel
+        if not base.is_dir():
+            continue
+        perfiles, archivos = [], []
+        if (base / "Local State").is_file():
+            archivos.append(base / "Local State")
+        for prof in _perfiles_chromium(base):
+            perfiles.append(_nombre_perfil_chromium(base, prof.name))
+            archivos += [prof / f for f in CHROMIUM_PERFIL
+                         if (prof / f).is_file() and not (prof / f).is_symlink()]
+        res[nombre] = {"perfiles": perfiles, "archivos": archivos}
+    fx = HOME / FIREFOX_BASE
+    if fx.is_dir():
+        perfiles, archivos = [], [fx / f for f in ("profiles.ini", "installs.ini") if (fx / f).is_file()]
+        pdir = fx / "Profiles"
+        for prof in sorted(pdir.iterdir()) if pdir.is_dir() else []:
+            if not prof.is_dir():
+                continue
+            perfiles.append(prof.name)
+            for it in sorted(prof.iterdir()):
+                if it.is_file() and not it.is_symlink() and match_any(it.name, FIREFOX_PERFIL):
+                    archivos.append(it)
+                elif it.is_dir() and it.name in FIREFOX_DIRS:
+                    for dp, dn, fn in os.walk(it):
+                        archivos += [Path(dp) / f for f in fn
+                                     if (Path(dp) / f).is_file() and not (Path(dp) / f).is_symlink()]
+        res["Firefox"] = {"perfiles": perfiles, "archivos": archivos}
+    return res
+
+
+def navegadores_abiertos():
+    return [n for n, proc in PROCESOS_NAVEGADOR.items() if run(["pgrep", "-x", proc])[2] == 0]
+
+
+def inventario_navegadores(inv_dir: Path):
+    """Lista de extensiones de cada navegador (para reinstalarlas). Devuelve los archivos generados."""
+    generados = []
+    for nombre, rel in NAVEGADORES_CHROMIUM.items():
+        base = HOME / rel
+        if not base.is_dir():
+            continue
+        lineas = []
+        for prof in _perfiles_chromium(base):
+            ext = prof / "Extensions"
+            if not ext.is_dir():
+                continue
+            lineas.append(f"== {prof.name}")
+            for e in sorted(x for x in ext.iterdir() if x.is_dir()):
+                nom = ""
+                vers = sorted(v for v in e.iterdir() if v.is_dir())
+                if vers:
+                    try:
+                        nom = json.loads((vers[-1] / "manifest.json").read_text(encoding="utf-8")).get("name", "")
+                    except Exception:
+                        pass
+                lineas.append(f"{e.name}\t{'(ver en la tienda)' if not nom or nom.startswith('__MSG_') else nom}")
+        if lineas:
+            fname = f"{nombre.lower()}_extensiones.txt"
+            (inv_dir / fname).write_text("\n".join(lineas) + "\n", encoding="utf-8")
+            generados.append(fname)
+    lineas = []
+    for ej in sorted((HOME / FIREFOX_BASE / "Profiles").glob("*/extensions.json")):
+        try:
+            addons = json.loads(ej.read_text(encoding="utf-8"))["addons"]
+        except Exception:
+            continue
+        lineas.append(f"== {ej.parent.name}")
+        lineas += [f"{ad.get('id')}\t{(ad.get('defaultLocale') or {}).get('name', '')}\t"
+                   f"{'activa' if ad.get('active') else 'inactiva'}"
+                   for ad in addons if ad.get("type") == "extension"]
+    if lineas:
+        (inv_dir / "firefox_extensiones.txt").write_text("\n".join(lineas) + "\n", encoding="utf-8")
+        generados.append("firefox_extensiones.txt")
+    return generados
+
+
+def wifi_redes():
+    """SSIDs de las redes Wi-Fi guardadas (no requiere contraseña)."""
+    o, _, _ = run(["networksetup", "-listallhardwareports"])
+    m = re.search(r"Hardware Port: (?:Wi-Fi|AirPort)\s*\nDevice: (\w+)", o)
+    if not m:
+        return []
+    o, _, c = run(["networksetup", "-listpreferredwirelessnetworks", m.group(1)])
+    if c != 0:
+        return []
+    return [l.strip() for l in o.splitlines() if l[:1] in ("\t", " ") and l.strip()]
+
+
+def exportar_wifi_claves(redes, inv_dir: Path):
+    """Pide cada clave al Llavero (macOS pide la contraseña de admin o Touch ID por red). Devuelve cuántas obtuvo."""
+    print("   macOS va a pedir tu contraseña (o Touch ID) por cada red; cancelá el diálogo para saltear una.")
+    filas = []
+    for i, ssid in enumerate(redes, 1):
+        o, e, c = run(["security", "find-generic-password", "-wa", ssid], timeout=120)
+        filas.append([ssid, o if c == 0 else "", "OK" if c == 0 else f"NO OBTENIDA: {e[:80]}"])
+        print(f"   [{i}/{len(redes)}] {ssid}: {filas[-1][2][:12]}", flush=True)
+    fd = os.open(inv_dir / "wifi_claves.csv", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(["ssid", "clave", "resultado"])
+        w.writerows(filas)
+    return sum(1 for f in filas if f[2] == "OK")
+
+
+def write_checksums(dest: Path, conocidos):
+    """Escribe checksums.sha256 (compatible con `shasum -a 256 -c`) de archivos/ y repos_pendientes/."""
+    n = 0
+    with open(dest / "checksums.sha256", "w", encoding="utf-8") as fh:
+        for sub in ("archivos", "repos_pendientes"):
+            base = dest / sub
+            if not base.is_dir():
+                continue
+            for dp, dn, fn in os.walk(base):
+                dn.sort()
+                for f in sorted(fn):
+                    fp = Path(dp) / f
+                    if fp.is_symlink() or not fp.is_file():
+                        continue
+                    try:
+                        h = conocidos.get(str(fp)) or sha256_file(fp)
+                    except OSError:
+                        continue
+                    fh.write(f"{h}  {fp.relative_to(dest)}\n")
+                    n += 1
+    return n
+
+
+def verificar_backup(carpeta):
+    """Recalcula los checksums de un backup y avisa de archivos faltantes o alterados. Devuelve el exit code."""
+    carpeta = Path(carpeta).expanduser().resolve()
+    cs = carpeta / "checksums.sha256"
+    if not cs.is_file():
+        print(f"No existe {cs}. Tiene que ser la carpeta de un backup que haya hecho la copia.")
+        return 2
+    lineas = [l for l in cs.read_text(encoding="utf-8").splitlines() if l.strip()]
+    faltan, distintos, ok = [], [], 0
+    print(f"Verificando {len(lineas)} archivos en {carpeta} ...")
+    for i, l in enumerate(lineas, 1):
+        h, _, rel = l.partition("  ")
+        fp = carpeta / rel
+        if not fp.is_file():
+            faltan.append(rel)
+        else:
+            try:
+                if sha256_file(fp) == h:
+                    ok += 1
+                else:
+                    distintos.append(rel)
+            except OSError as e:
+                distintos.append(f"{rel} (no se pudo leer: {e})")
+        if i % 1000 == 0:
+            print(f"   {i}/{len(lineas)}", flush=True)
+    print(f"\nOK: {ok} | alterados: {len(distintos)} | faltantes: {len(faltan)}")
+    if distintos or faltan:
+        detalle = [f"ALTERADO  {r}" for r in distintos] + [f"FALTANTE  {r}" for r in faltan]
+        for d in detalle[:50]:
+            print(f"   {d}")
+        if len(detalle) > 50:
+            print(f"   ... y {len(detalle) - 50} más")
+        out = carpeta / f"verificacion_{TS}.txt"
+        out.write_text("\n".join(detalle) + "\n", encoding="utf-8")
+        print(f"Detalle completo: {out}")
+        return 1
+    print("✅ El backup está íntegro.")
+    return 0
+
+
+def agrupar_repos(repos):
+    """Reparte los repos en grupos excluyentes, de lo más urgente a lo más tranquilo."""
+    sin_remoto = [r for r in repos if not r["remotos"]]
+    con = [r for r in repos if r["remotos"]]
+    falta_commit_push = [r for r in con if r["modificados"] or r["sin_trackear"] or r["commits_sin_push"]]
+    ids = {id(r) for r in falta_commit_push}
+    otros = [r for r in con if id(r) not in ids and r["problemas"]]
+    ids |= {id(r) for r in otros}
+    al_dia = [r for r in con if id(r) not in ids]
+    return [
+        ("❌ Sin remoto", "Solo existen en esta Mac: si no se copian se pierden. Se copian completos a `repos_pendientes/`.",
+         sin_remoto),
+        ("⚠️ Con remoto, falta commit o push",
+         "Tienen cambios sin commit, archivos sin trackear o commits que no están en el remoto. Se copian completos a `repos_pendientes/`.",
+         falta_commit_push),
+        ("🔸 Con remoto, otros pendientes",
+         "Todo está subido, pero hay stashes, ramas sin upstream o con upstream borrado. Con stash o ramas sin upstream se copian a `repos_pendientes/`.",
+         otros),
+        ("✅ Con remoto y al día", "Se recuperan con `clonar_repos.sh`; no hace falta copiarlos.", al_dia),
+    ]
+
+
 def write_report(report_path, data):
     L = [f"# Backup Mac — {data['fecha']}", "",
          f"- Equipo: **{data['equipo']}** · macOS {data['macos']} · usuario `{data['usuario']}`",
          f"- Raíces escaneadas: {', '.join(data['roots'])}", ""]
     repos = data["repos"]
-    con_prob = [r for r in repos if r["problemas"]]
     L += ["## Resumen", "",
           f"- Apps: {len(data['apps'])}",
           f"- Herramientas detectadas: {len(data['herramientas'])}",
-          f"- Repos git: {len(repos)} (con pendientes: {len(con_prob)}, sin remoto: "
-          f"{sum(1 for r in repos if not r['remotos'])})",
+          f"- Repos git: {len(repos)} (" + ", ".join(
+              f"{t.split(' ', 1)[1].lower()}: {len(g)}" for t, _, g in agrupar_repos(repos)) + ")",
           f"- Archivos a copiar: {data['n_archivos']} ({human(data['bytes_archivos'])})",
           f"- Repos a copiar completos: {sum(1 for r in repos if r['copiar_completo'])} "
-          f"({human(data['bytes_repos'])})", ""]
+          f"({human(data['bytes_repos'])})",
+          f"- Archivos sensibles por patrón: {sum(g['cantidad'] for g in data['resumen_sensibles'])}", ""]
 
-    L += ["## Repos git", "", "| Repo | Rama | Remoto | Último commit | Estado |", "|---|---|---|---|---|"]
-    for r in sorted(repos, key=lambda r: (not r["problemas"], r["rel"].lower())):
-        remoto = next(iter(r["remotos"].values()), "—")
-        estado = ("⚠️ " if r["problemas"] else "✅ ") + r["estado"]
-        L.append(f"| `{md(r['rel'])}` | {md(r['rama'])} | {md(remoto)} | {md(r['ultimo_commit'][:10])} | {md(estado)} |")
+    L += ["## Archivos sensibles encontrados", "",
+          "Cantidad por tipo de archivo y qué contiene o puede contener cada uno.", "",
+          "| Categoría | Hallados | Tamaño | Qué es / qué puede tener |", "|---|---|---|---|"]
+    for g in data["resumen_sensibles"]:
+        det = ", ".join(f"`{md(k)}` ×{v}" for k, v in sorted(g["patrones"].items(), key=lambda kv: -kv[1]))
+        L.append(f"| **{md(g['categoria'])}** | {g['cantidad']}: {det} | {human(g['bytes'])} | {md(g['descripcion'])} |")
+    if not data["resumen_sensibles"]:
+        L.append("| — | 0 | — | No se encontraron archivos sensibles por patrón |")
+    L.append("")
+
+    L += ["## Repos git", ""]
+    for titulo, desc, grupo in agrupar_repos(repos):
+        L += [f"### {titulo} ({len(grupo)})", "", desc, ""]
+        if not grupo:
+            L += ["_Ninguno._", ""]
+            continue
+        L += ["| Repo | Rama | Remoto | Último commit | Detalle |", "|---|---|---|---|---|"]
+        for r in sorted(grupo, key=lambda r: r["rel"].lower()):
+            remoto = next(iter(r["remotos"].values()), "—")
+            L.append(f"| `{md(r['rel'])}` | {md(r['rama'])} | {md(remoto)} | {md(r['ultimo_commit'][:10])} | "
+                     f"{md(r['estado'])} |")
+        L.append("")
+
+    L += ["## Navegadores, historial de terminal y Wi-Fi", ""]
+    if data.get("navegadores_abiertos"):
+        L += [f"> ⚠️ Estaban abiertos: {', '.join(data['navegadores_abiertos'])}. Cerralos antes de copiar: "
+              "las bases de datos en uso pueden copiarse inconsistentes (el manifest marca los archivos con checksum distinto).", ""]
+    if data.get("navegadores"):
+        L += ["| Navegador | Perfiles | Archivos | Tamaño |", "|---|---|---|---|"]
+        for n in data["navegadores"]:
+            L.append(f"| **{md(n['nombre'])}** | {md(', '.join(n['perfiles']) or '—')} | {n['archivos']} | {human(n['bytes'])} |")
+        L += ["",
+              "Se copian marcadores, preferencias, historial, autocompletado, contraseñas guardadas y extensiones "
+              "(Firefox), sin cachés ni cookies. La lista de extensiones queda en `inventario/*_extensiones.txt`.",
+              "Las contraseñas de Chrome/Brave/Edge están cifradas con una clave del Llavero: en la Mac nueva no se "
+              "pueden leer solo con el archivo. Conviene iniciar sesión con la cuenta de sincronización del navegador. "
+              "Las de Firefox sí se recuperan copiando `key4.db` + `logins.json` (si no hay contraseña maestra).", ""]
+    else:
+        L += ["_No se encontraron perfiles de Chrome, Brave, Edge ni Firefox._", ""]
+    h = data.get("historial_terminal", {"archivos": 0, "bytes": 0})
+    L += [f"- Historial de terminal y de herramientas (zsh, bash, psql, mysql, python, node...): "
+          f"{h['archivos']} archivos ({human(h['bytes'])})"]
+    redes = data.get("wifi_redes", [])
+    L += [f"- Redes Wi-Fi guardadas: {len(redes)} (lista en `inventario/wifi_redes.txt`)"]
+    if data.get("wifi_claves"):
+        L += [f"- Claves de Wi-Fi exportadas: {data['wifi_claves']} de {len(redes)} en `inventario/wifi_claves.csv` "
+              "(texto plano, permisos 600)"]
+    else:
+        L += ["- Claves de Wi-Fi: no exportadas. Para guardarlas, correr con `--wifi-claves` "
+              "(macOS pide la contraseña de admin por cada red)."]
+    L += [""]
 
     if data["ignorados_omitidos"]:
         L += ["", "### Carpetas ignoradas NO copiadas (demasiados archivos, revisar a mano)", ""]
@@ -501,7 +852,9 @@ def write_report(report_path, data):
           "5. Configs/.env/keystores encima de los repos clonados: `rsync -av archivos/ ~/`",
           "6. Permisos SSH: `chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_*`",
           "7. Node/Python/Java: reinstalar versiones según `inventario/` (nvm, pyenv, sdkman/JDKs)",
-          "8. Extensiones VS Code: `cat inventario/vscode_extensiones.txt | cut -d@ -f1 | xargs -L1 code --install-extension`",
+          "8. Wi-Fi (si se exportaron las claves): `networksetup -addpreferredwirelessnetworkatindex en0 \"SSID\" 0 WPA2 \"clave\"`",
+          "9. Navegadores: cerrar el navegador antes del paso 5; en Chrome/Brave/Edge iniciar sesión para sincronizar contraseñas",
+          "10. Extensiones VS Code: `cat inventario/vscode_extensiones.txt | cut -d@ -f1 | xargs -L1 code --install-extension`",
           ""]
     report_path.write_text("\n".join(L), encoding="utf-8")
 
@@ -525,14 +878,22 @@ def write_clone_script(dest, repos):
 # ------------------------------------------------------------------ main
 def main():
     ap = argparse.ArgumentParser(description="Inventario + backup antes de formatear macOS")
-    ap.add_argument("--dest", default=str(HOME / "Desktop" / f"backup_mac_{TS}"), help="carpeta destino")
+    ap.add_argument("--dest", default=str(SCRIPT_DIR / "backup" / f"backup_mac_{TS}"),
+                    help="carpeta destino (default: backup/backup_mac_<fecha> junto al script)")
     ap.add_argument("--roots", nargs="+", default=[str(HOME)], help="carpetas a escanear (default ~)")
     ap.add_argument("--exclude", nargs="*", default=[], help="carpetas a excluir")
     ap.add_argument("--max-mb", type=float, default=50, help="tamaño máximo por archivo (default 50 MB)")
     ap.add_argument("--solo-reporte", action="store_true", help="solo relevamiento, no copia")
     ap.add_argument("--no-copiar-repos", action="store_true", help="no copiar repos pendientes completos")
     ap.add_argument("--yes", action="store_true", help="no pedir confirmación")
+    ap.add_argument("--wifi-claves", action="store_true",
+                    help="exportar las claves de Wi-Fi del Llavero (macOS pide la contraseña por cada red)")
+    ap.add_argument("--verificar", metavar="CARPETA",
+                    help="verificar la integridad de un backup (checksums.sha256) y salir")
     a = ap.parse_args()
+
+    if a.verificar:
+        sys.exit(verificar_backup(a.verificar))
 
     if sys.version_info < (3, 9):
         sys.exit("Requiere Python 3.9+")
@@ -556,7 +917,16 @@ def main():
 
     print("[3/6] Inventarios (brew, npm, pip, sdkman, extensiones...)...")
     inventario = dump_inventario(dest / "inventario")
-    print(f"   {len(inventario)} archivos en inventario/")
+    inventario += inventario_navegadores(dest / "inventario")
+    redes = wifi_redes()
+    if redes:
+        (dest / "inventario" / "wifi_redes.txt").write_text("\n".join(redes) + "\n", encoding="utf-8")
+        inventario.append("wifi_redes.txt")
+    wifi_claves_n = 0
+    if a.wifi_claves and redes:
+        wifi_claves_n = exportar_wifi_claves(redes, dest / "inventario")
+        inventario.append("wifi_claves.csv")
+    print(f"   {len(inventario)} archivos en inventario/ ({len(redes)} redes Wi-Fi)")
 
     print("[4/6] Escaneando carpetas (repos + archivos sensibles)...")
     repo_paths, sensibles = scan(a.roots, skip_abs)
@@ -578,6 +948,16 @@ def main():
         print(f"   [{i}/{len(repo_paths)}] {flag} {info['rel']}  ->  {info['estado']}")
     for f in dotfile_paths():
         plan.setdefault(f, "dotfile-config")
+    navegadores = navegador_paths()
+    for info in navegadores.values():
+        for f in info["archivos"]:
+            plan.setdefault(f, "navegador")
+    historial = historial_paths()
+    for f in historial:
+        plan.setdefault(f, "historial-terminal")
+    abiertos = navegadores_abiertos()
+    if abiertos:
+        print(f"   ⚠️  Navegadores abiertos: {', '.join(abiertos)} (cerralos antes de copiar)")
 
     bytes_archivos = sum(min(fsize(p), max_bytes + 1) for p in plan if fsize(p) <= max_bytes)
     a_copiar_repos = [] if a.no_copiar_repos else [r for r in repos if r["copiar_completo"]]
@@ -592,14 +972,16 @@ def main():
         "roots": a.roots,
         "apps": apps, "herramientas": herramientas, "inventario": inventario,
         "repos": repos, "ignorados_omitidos": omitidos,
+        "resumen_sensibles": resumen_sensibles(sensibles),
+        "navegadores": [{"nombre": n, "perfiles": i["perfiles"], "archivos": len(i["archivos"]),
+                         "bytes": sum(fsize(f) for f in i["archivos"])} for n, i in navegadores.items()],
+        "navegadores_abiertos": abiertos,
+        "historial_terminal": {"archivos": len(historial), "bytes": sum(fsize(f) for f in historial)},
+        "wifi_redes": redes, "wifi_claves": wifi_claves_n,
         "n_archivos": len(plan), "bytes_archivos": bytes_archivos, "bytes_repos": bytes_repos,
         "archivos": {str(k): v for k, v in sorted(plan.items(), key=lambda x: str(x[0]))},
     }
-    if a.solo_reporte:
-        report_path = Path(__file__).resolve().parent / "reportes" / f"reporte_{TS}.md"
-    else:
-        report_path = dest / "REPORTE.md"
-    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path = dest / f"reporte_{TS}.md"
     write_report(report_path, data)
     write_clone_script(dest, repos)
     (dest / "reporte.json").write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -610,7 +992,7 @@ def main():
     print(f"Archivos a copiar: {len(plan)} ({human(bytes_archivos)}) — límite por archivo {human(max_bytes)}")
     print(f"Repos a copiar completos: {len(a_copiar_repos)} ({human(bytes_repos)})")
     if omitidos:
-        print(f"Carpetas ignoradas omitidas por tamaño: {len(omitidos)} (ver REPORTE.md)")
+        print(f"Carpetas ignoradas omitidas por tamaño: {len(omitidos)} (ver el reporte)")
     print(f"Reporte: {report_path}")
 
     if a.solo_reporte:
@@ -636,20 +1018,25 @@ def main():
         try:
             shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True,
                             ignore=shutil.ignore_patterns(*(PRUNE_DIRS - {".git"})))
-            manifest.append([str(src), str(dst), "", "repo-pendiente", "OK"])
+            manifest.append([str(src), str(dst), "", "repo-pendiente", "OK", ""])
         except shutil.Error as e:
-            manifest.append([str(src), str(dst), "", "repo-pendiente", f"PARCIAL: {len(e.args[0])} errores"])
+            manifest.append([str(src), str(dst), "", "repo-pendiente", f"PARCIAL: {len(e.args[0])} errores", ""])
         except Exception as e:
-            manifest.append([str(src), str(dst), "", "repo-pendiente", f"ERROR: {e}"])
+            manifest.append([str(src), str(dst), "", "repo-pendiente", f"ERROR: {e}", ""])
 
     with open(dest / "manifest.csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
-        w.writerow(["origen", "destino", "bytes", "motivo", "resultado"])
+        w.writerow(["origen", "destino", "bytes", "motivo", "resultado", "sha256"])
         w.writerows(manifest)
+
+    print("   calculando checksums...")
+    n_hash = write_checksums(dest, {m[1]: m[5] for m in manifest if m[1] and m[5]})
+    print(f"   {n_hash} archivos en checksums.sha256")
 
     errores = sum(1 for m in manifest if not str(m[4]).startswith("OK"))
     print(f"\nListo. Copiado {human(total)} en archivos/ + {len(a_copiar_repos)} repos completos.")
     print(f"Omitidos/errores: {errores} (ver manifest.csv)")
+    print(f'\nPara verificar la integridad (conviene tras volver a conectar el disco): python3 {Path(__file__).name} --verificar "{dest}"')
     print("\n⚠️  El backup contiene claves y secretos. Para guardarlo cifrado:")
     print(f'   hdiutil create -encryption AES-256 -srcfolder "{dest}" -volname backup_mac "{dest}.dmg"')
 

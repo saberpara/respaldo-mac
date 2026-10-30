@@ -1,13 +1,15 @@
 # --- Salidas del backup (contienen secretos, NUNCA commitear) ---
 backup_mac_*/
-reportes/
+backup/
 backup_mac_*.dmg
 *.dmg
 *.sparseimage
 *.sparsebundle/
-REPORTE.md
+reporte_*.md
 reporte.json
 manifest.csv
+checksums.sha256
+verificacion_*.txt
 clonar_repos.sh
 inventario/
 archivos/
