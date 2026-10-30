@@ -46,6 +46,8 @@ python3 mac_backup.py --dest /Volumes/Externo/backup_mac --max-mb 100 --yes
 | `--solo-reporte` | — | Genera el reporte y los inventarios sin copiar archivos |
 | `--no-copiar-repos` | — | No copia los repos pendientes completos |
 | `--rutas` | `rutas_extra.txt` junto al script | Archivo con las rutas extra a copiar tal cual (ver más abajo) |
+| `--dump-postgres` | — | Vuelca las bases de PostgreSQL de `localhost:5432` una por una (`pg_dump -Fc`) más los roles, en `postgres/` |
+| `--calcular-tamano` | — | Agrega al final del reporte el tamaño estimado del backup: por categoría, repos completos más pesados, total y si alcanza el espacio libre del destino |
 | `--wifi-claves` | — | Exporta las claves de las redes Wi-Fi guardadas a `inventario/wifi_claves.csv` (macOS pide la contraseña de admin o Touch ID por cada red) |
 | `--verificar CARPETA` | — | No hace backup: recalcula los checksums de un backup existente y avisa de archivos alterados o faltantes |
 | `--yes` | — | No pide confirmación antes de copiar |
@@ -71,9 +73,24 @@ El script carga el `PATH` de tu shell de login, así detecta lo instalado con nv
 - JDKs (`java_home -V`), candidatos de sdkman
 - gems, cargo, binarios de Go
 - Extensiones de VS Code y Cursor
-- Android SDK (platforms, build-tools, ndk)
+- Android SDK (platforms, build-tools, ndk, cmake, platform-tools, emulator, system-images), paquetes de `sdkmanager --list_installed` (si hay cmdline-tools) y emuladores (AVDs)
+- Xcode: versión, SDKs, runtimes de iOS, simuladores disponibles y dispositivos físicos conocidos (`devicectl`, Xcode 15+)
 - Imágenes y volúmenes de Docker
 - crontab, LaunchAgents, fuentes del usuario, `/etc/hosts`
+
+El reporte resume todo esto en la sección **Entorno de desarrollo**: IDEs instalados, versiones de Java (JDKs y SDKMAN) (Xcode, Android Studio, VS Code, Cursor, JetBrains...), extensiones de VS Code y Cursor, iOS/Xcode (SDKs, runtimes, simuladores, dispositivos físicos) y Android (componentes del SDK, paquetes y AVDs). La configuración y los plugins de Android Studio (`~/Library/Application Support/Google/AndroidStudio*`) se copian con el resto de la configuración del usuario.
+
+### PostgreSQL (puerto 5432)
+El reporte tiene la sección **PostgreSQL** con la versión, el directorio de datos y **qué bases de datos hay y cuánto pesa cada una** del servidor que escucha en `localhost:5432`. Solo consulta (`pg_database_size`) y entra sin contraseña (Postgres.app suele permitirlo); si no hay servidor o pide contraseña, lo avisa en el reporte. Usa `psql` del PATH, de Postgres.app o de Homebrew.
+
+Los datos de PostgreSQL **no** se copian salvo que uses `--dump-postgres`. Con ese flag, durante la copia (se ignora en `--solo-reporte`) hace **un `pg_dump -Fc` por base** (formato comprimido) más `globales.sql` con los roles (`pg_dumpall --globals-only`), todo en `postgres/` y dentro de `checksums.sha256`. Si una base falla, queda como `ERROR` en el manifest y sigue con las demás. Pueden ser lentos y pesados; los volcados contienen tus datos y los hashes de contraseñas de los roles.
+
+Restaurar:
+
+```bash
+psql -h localhost -p 5432 -d postgres -f postgres/globales.sql   # roles primero
+createdb NOMBRE && pg_restore -d NOMBRE postgres/NOMBRE.dump      # cada base
+```
 
 ### Repos git
 Para cada repo encontrado registra:
@@ -110,7 +127,7 @@ Se buscan por nombre en todas las raíces, estén o no trackeados. El reporte in
 | Certificados públicos y firmas | `*.cer`, `*.crt`, `*.der`, `*.p7b`, `*.p7s`, `*.spc`, `*.csr`, `*.crl` |
 | Claves y firmas GPG/PGP | `*.gpg`, `*.pgp`, `*.asc`, `*.sig` |
 | Apple: provisioning y APNs | `*.mobileprovision`, `*.provisionprofile`, `*.p8` |
-| Firebase / Google y service accounts | `google-services.json`, `GoogleService-Info.plist`, `*service-account*.json`, `*credentials*.json`, `client_secret*.json` |
+| Firebase / Google y service accounts | `google-services.json`, `GoogleService-Info.plist`, `*service-account*.json`, `*credentials*.json`, `client_secret*.json`, `*.googleusercontent.com.json` |
 | Tokens, secretos y config local | `.npmrc`, `.yarnrc`, `secrets.*`, `*.local.json`, `application*.yml`, `appsettings*.json` |
 | Infra y acceso remoto | `.pgpass`, `.htpasswd`, `*.tfvars`, `terraform.tfstate*`, `*.ovpn` |
 | Gestor de contraseñas | `*.kdbx` |
@@ -137,6 +154,7 @@ Proyectos/cliente-x        # relativa: cuenta desde ~
 - Se copian **tal cual** y **sin límite de tamaño** (`--max-mb` no aplica), con motivo `ruta-extra` en el manifest.
 - No se copian las carpetas que se regeneran (`node_modules`, `build`, `dist`, `venv`, `.venv`, `__pycache__`, `target`, `Pods`, `.gradle`, `.next`, `vendor`...; es `PRUNE_DIRS`). La carpeta `.git` **sí** se copia. Tampoco `.DS_Store` ni los symlinks.
 - El reporte lista cada ruta con su cantidad de archivos y tamaño, y avisa si alguna no existe.
+- Los repos git que están dentro de una ruta extra se marcan con 📌 en el reporte (en la tabla y con un conteo en el título del grupo), para saber que ya quedan copiados aunque estén "Sin remoto".
 
 ### Archivos ignorados por git
 Todo lo que el `.gitignore` de cada repo deja afuera, **excepto** carpetas regenerables (`node_modules`, `build`, `dist`, `.gradle`, `venv`, `Pods`, `target`, `.next`, etc.) y basura (`.DS_Store`, `*.log`, `*.pyc`, `*.class`, `*.apk`…).
@@ -161,7 +179,7 @@ backup_mac_YYYYMMDD_HHMM/
 └── repos_pendientes/     # repos sin remoto o con trabajo sin subir, completos con .git
 ```
 
-En `manifest.csv`, la columna `motivo` puede ser `patron-sensible`, `ignorado-git`, `dotfile-config`, `ruta-extra`, `navegador`, `historial-terminal` o `repo-pendiente`. Cada archivo se copia y se compara su SHA-256 contra el original; si no coincide queda como `ERROR` en `resultado`.
+En `manifest.csv`, la columna `motivo` puede ser `patron-sensible`, `ignorado-git`, `dotfile-config`, `ruta-extra`, `navegador`, `historial-terminal`, `postgres-dump` o `repo-pendiente`. Cada archivo se copia y se compara su SHA-256 contra el original; si no coincide queda como `ERROR` en `resultado`.
 
 ---
 

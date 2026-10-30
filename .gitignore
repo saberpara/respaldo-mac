@@ -12,6 +12,7 @@ checksums.sha256
 rutas_extra.txt
 verificacion_*.txt
 clonar_repos.sh
+postgres/
 inventario/
 archivos/
 repos_pendientes/

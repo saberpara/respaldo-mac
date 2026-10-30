@@ -88,7 +88,7 @@ SENSIBLES_INFO = [
      "Perfiles de aprovisionamiento iOS/macOS y claves `.p8` de APNs, App Store Connect o Sign in with Apple."),
     (("google-services.json", "googleservice-info.plist", "*firebase*.json", ".firebaserc"), "Config de Firebase/Google",
      "IDs de proyecto y API keys de Firebase para Android/iOS; en `*firebase*.json` puede haber reglas o credenciales."),
-    (("*service-account*.json", "*serviceaccount*.json", "*credentials*.json", "client_secret*.json"),
+    (("*service-account*.json", "*serviceaccount*.json", "*credentials*.json", "client_secret*.json", "*.googleusercontent.com.json"),
      "Service accounts y credenciales cloud",
      "Claves de cuentas de servicio (GCP/Firebase) y client secrets de OAuth: acceso programático a servicios en la nube."),
     ((".npmrc", ".yarnrc", ".yarnrc.yml"), "Tokens de gestores de paquetes",
@@ -128,6 +128,7 @@ DOTFILES = [
     "Library/Application Support/Cursor/User/keybindings.json",
     "Library/Application Support/JetBrains",  # filtrado por tamaño
     "Library/Fonts",
+    "Library/Application Support/Google/AndroidStudio*",  # settings, keymaps y plugins de Android Studio
 ]
 
 # Historial de terminal y de herramientas de línea de comandos (relativos a ~)
@@ -203,7 +204,15 @@ INVENTARIO_CMDS = {
     "go_bin.txt": "ls -1 ~/go/bin",
     "vscode_extensiones.txt": "code --list-extensions --show-versions",
     "cursor_extensiones.txt": "cursor --list-extensions --show-versions",
-    "android_sdk.txt": "ls -1 ~/Library/Android/sdk/platforms ~/Library/Android/sdk/build-tools ~/Library/Android/sdk/ndk",
+    "android_sdk.txt": 'for d in platforms build-tools ndk cmake platform-tools emulator system-images; do '
+                       '[ -d ~/Library/Android/sdk/$d ] && { echo "== $d"; ls -1 ~/Library/Android/sdk/$d; }; done; true',
+    "android_sdk_instalado.txt": "~/Library/Android/sdk/cmdline-tools/latest/bin/sdkmanager --list_installed",
+    "android_avds.txt": "ls -1 ~/.android/avd | grep '\\.ini$' | sed 's/\\.ini$//'",
+    "xcode_version.txt": "xcodebuild -version",
+    "xcode_sdks.txt": "xcodebuild -showsdks",
+    "ios_runtimes.txt": "xcrun simctl list runtimes",
+    "ios_simuladores.txt": "xcrun simctl list devices available",
+    "ios_dispositivos_fisicos.txt": "xcrun devicectl list devices",
     "docker_images.txt": "docker images --format '{{.Repository}}:{{.Tag}}  {{.Size}}'",
     "docker_volumes.txt": "docker volume ls",
     "crontab.txt": "crontab -l",
@@ -537,8 +546,10 @@ def copy_file(src: Path, dest_root: Path, motivo, manifest, max_bytes):
 
 def dotfile_paths(lista=None):
     out = []
+    candidatos = []
     for d in (DOTFILES if lista is None else lista):
-        p = HOME / d
+        candidatos += sorted(HOME.glob(d)) if any(c in d for c in "*?[") else [HOME / d]
+    for p in candidatos:
         if p.is_symlink() and not p.exists():
             continue
         if p.is_file():
@@ -579,7 +590,7 @@ def rutas_extra(archivo: Path):
                 dn[:] = [d for d in dn if d not in prune and not (Path(dp) / d).is_symlink()]
                 archivos += [Path(dp) / f for f in fn
                              if f != ".DS_Store" and (Path(dp) / f).is_file() and not (Path(dp) / f).is_symlink()]
-        out.append({"ruta": linea, "existe": p.exists(), "archivos": archivos})
+        out.append({"ruta": linea, "path": p.resolve(), "existe": p.exists(), "archivos": archivos})
     return out
 
 
@@ -708,7 +719,7 @@ def write_checksums(dest: Path, conocidos):
     """Escribe checksums.sha256 (compatible con `shasum -a 256 -c`) de archivos/ y repos_pendientes/."""
     n = 0
     with open(dest / "checksums.sha256", "w", encoding="utf-8") as fh:
-        for sub in ("archivos", "repos_pendientes"):
+        for sub in ("archivos", "repos_pendientes", "postgres"):
             base = dest / sub
             if not base.is_dir():
                 continue
@@ -767,6 +778,97 @@ def verificar_backup(carpeta):
     return 0
 
 
+MOTIVOS_NOMBRE = {
+    "patron-sensible": "Archivos sensibles", "ignorado-git": "Ignorados por git", "dotfile-config": "Dotfiles y configuración",
+    "navegador": "Navegadores", "historial-terminal": "Historial de terminal", "ruta-extra": "Rutas extra",
+}
+
+
+ENTORNO_ARCHIVOS = {
+    "vscode": "vscode_extensiones.txt", "cursor": "cursor_extensiones.txt",
+    "xcode": "xcode_version.txt", "ios_sdks": "xcode_sdks.txt", "ios_runtimes": "ios_runtimes.txt",
+    "ios_simuladores": "ios_simuladores.txt", "ios_fisicos": "ios_dispositivos_fisicos.txt",
+    "android_sdk": "android_sdk.txt", "android_sdk_instalado": "android_sdk_instalado.txt",
+    "android_avds": "android_avds.txt",
+    "java_home": "java_home.txt", "jvms": "jvms.txt", "sdkman": "sdkman_candidatos.txt",
+}
+IDES = ["Xcode", "Android Studio", "Visual Studio Code", "Cursor", "IntelliJ", "PyCharm", "WebStorm", "PhpStorm",
+        "GoLand", "Rider", "CLion", "DataGrip", "RubyMine", "Sublime", "Zed", "Windsurf"]
+
+
+def resumen_entorno(inv_dir: Path, apps):
+    """Lee los inventarios de IDEs/SDKs para mostrarlos en el reporte: {clave: [líneas]}."""
+    env = {}
+    for k, fname in ENTORNO_ARCHIVOS.items():
+        f = inv_dir / fname
+        env[k] = [l.rstrip() for l in f.read_text(encoding="utf-8").splitlines() if l.strip()] if f.is_file() else []
+    env["ios_simuladores"] = [re.sub(r"\s*\([0-9A-F]{8}-[0-9A-F-]{27}\)", "", l) for l in env["ios_simuladores"]]
+    fis = [l for l in env["ios_fisicos"] if "simulated" not in l]
+    env["ios_fisicos"] = fis if len(fis) > 2 else []  # solo quedan encabezado y separador
+    env["ides"] = [f"{a['nombre']} {a['version']}".strip() for a in apps if any(k.lower() in a["nombre"].lower() for k in IDES)]
+    return env
+
+
+PG_PUERTO = "5432"
+PG_BASES_SQL = ("SELECT datname || '|' || pg_database_size(datname) FROM pg_database "
+                "WHERE NOT datistemplate ORDER BY pg_database_size(datname) DESC")
+
+
+def postgres_5432():
+    """Bases de datos del servidor PostgreSQL en localhost:5432 y lo que pesa cada una (solo lectura, sin contraseña).
+    Devuelve {"version", "datadir", "bases": [{"nombre", "bytes"}]} o {"error"}."""
+    candidatos = [Path("/Applications/Postgres.app/Contents/Versions/latest/bin/psql"),
+                  *sorted(Path("/opt/homebrew/opt").glob("postgresql*/bin/psql")),
+                  *sorted(Path("/usr/local/opt").glob("postgresql*/bin/psql"))]
+    psql = shutil.which("psql") or next((str(c) for c in candidatos if c.is_file()), None)
+    if not psql:
+        return {"error": "no se encontró `psql` (Postgres.app o Homebrew)"}
+    ultimo_error = ""
+    for usuario in (None, "postgres"):
+        cmd = [psql, "-h", "localhost", "-p", PG_PUERTO, "-w", "-At", "-d", "postgres"] + (["-U", usuario] if usuario else [])
+        o, e, c = run(cmd + ["-c", PG_BASES_SQL], timeout=30)
+        if c != 0:
+            ultimo_error = (e.splitlines() or ["sin respuesta"])[0]
+            continue
+        bases = []
+        for linea in o.splitlines():
+            nombre, _, tam = linea.rpartition("|")
+            if nombre and tam.isdigit():
+                bases.append({"nombre": nombre, "bytes": int(tam)})
+        version = run(cmd + ["-c", "show server_version"], timeout=30)[0]
+        datadir = run(cmd + ["-c", "show data_directory"], timeout=30)[0]  # solo superusuarios; si falla queda vacío
+        return {"version": version, "datadir": datadir, "bases": bases, "psql": psql, "usuario": usuario}
+    return {"error": f"no se pudo conectar a localhost:{PG_PUERTO} sin contraseña ({ultimo_error})"}
+
+
+def volcar_postgres(dest: Path, pg, manifest):
+    """Un pg_dump -Fc por base + roles (pg_dumpall --globals-only) en postgres/. Devuelve los bytes escritos."""
+    out = dest / "postgres"
+    out.mkdir(parents=True, exist_ok=True)
+    bindir = Path(pg["psql"]).parent
+    conn = ["-h", "localhost", "-p", PG_PUERTO, "-w"] + (["-U", pg["usuario"]] if pg["usuario"] else [])
+    trabajos = [("roles y permisos (globals)", str(bindir / "pg_dumpall"), conn + ["--globals-only", "-f"], "globales.sql", None)]
+    for b in pg["bases"]:
+        trabajos.append((b["nombre"], str(bindir / "pg_dump"), conn + ["-Fc", "-d", b["nombre"], "-f"],
+                         re.sub(r"[^\w.-]", "_", b["nombre"]) + ".dump", b["bytes"]))
+    total = 0
+    for i, (nombre, exe, args, fname, est) in enumerate(trabajos, 1):
+        dst = out / fname
+        print(f"   [{i}/{len(trabajos)}] {nombre}" + (f" (~{human(est)} en disco)" if est else ""), flush=True)
+        _, e, c = run([exe, *args, str(dst)], timeout=6 * 3600)
+        if c != 0:
+            dst.unlink(missing_ok=True)
+            manifest.append([f"postgres://localhost:{PG_PUERTO}/{nombre}", "", "", "postgres-dump",
+                             f"ERROR: {(e.splitlines() or ['falló'])[-1][:120]}", ""])
+            print(f"      ERROR: {(e.splitlines() or ['falló'])[-1][:120]}")
+            continue
+        size = fsize(dst)
+        total += size
+        manifest.append([f"postgres://localhost:{PG_PUERTO}/{nombre}", str(dst), size, "postgres-dump", "OK", sha256_file(dst)])
+        print(f"      OK {human(size)}")
+    return total
+
+
 def agrupar_repos(repos):
     """Reparte los repos en grupos excluyentes, de lo más urgente a lo más tranquilo."""
     sin_remoto = [r for r in repos if not r["remotos"]]
@@ -816,7 +918,10 @@ def write_report(report_path, data):
 
     L += ["## Repos git", ""]
     for titulo, desc, grupo in agrupar_repos(repos):
+        cubiertos = sum(1 for r in grupo if r.get("en_rutas_extra"))
         L += [f"### {titulo} ({len(grupo)})", "", desc, ""]
+        if cubiertos:
+            L += [f"📌 {cubiertos} de {len(grupo)} están dentro de `rutas_extra.txt` y se copian completos ahí.", ""]
         if not grupo:
             L += ["_Ninguno._", ""]
             continue
@@ -824,7 +929,7 @@ def write_report(report_path, data):
         for r in sorted(grupo, key=lambda r: r["rel"].lower()):
             remoto = next(iter(r["remotos"].values()), "—")
             L.append(f"| `{md(r['rel'])}` | {md(r['rama'])} | {md(remoto)} | {md(r['ultimo_commit'][:10])} | "
-                     f"{md(r['estado'])} |")
+                     f"{'📌 en rutas_extra · ' if r.get('en_rutas_extra') else ''}{md(r['estado'])} |")
         L.append("")
 
     L += ["## Navegadores, historial de terminal y Wi-Fi", ""]
@@ -878,6 +983,55 @@ def write_report(report_path, data):
     for a in data["apps"]:
         L.append(f"| {md(a['nombre'])} | {md(a['version'])} | {md(a['origen'])} | {md(a['bundle_id'])} |")
 
+    env = data.get("entorno") or {}
+
+    def lista(titulo, lineas, vacio="_No detectado._"):
+        if not lineas:
+            return [f"**{titulo}**: {vacio}", ""]
+        return [f"<details><summary><b>{titulo}</b> ({len(lineas)})</summary>", "", "```", *lineas, "```", "</details>", ""]
+
+    L += ["", "## Entorno de desarrollo", "",
+          "Para reinstalar el mismo entorno. El detalle crudo está en `inventario/`.", ""]
+    L += lista("IDEs y editores instalados", env.get("ides", []))
+    L += lista("Extensiones de VS Code", env.get("vscode", []), "_VS Code no detectado o sin extensiones._")
+    L += lista("Extensiones de Cursor", env.get("cursor", []), "_Cursor no detectado o sin extensiones._")
+    L += ["### Java", ""]
+    L += lista("JDKs registrados (`java_home -V`)", env.get("java_home", []), "_No se detectó ningún JDK._")
+    L += lista("JDKs en `/Library/Java/JavaVirtualMachines`", env.get("jvms", []))
+    L += lista("Candidatos de SDKMAN (java, gradle, maven, kotlin...)", env.get("sdkman", []), "_SDKMAN no detectado._")
+    L += ["### iOS / Xcode", ""]
+    L += lista("Xcode", env.get("xcode", []))
+    L += lista("SDKs de Xcode (`xcodebuild -showsdks`)", env.get("ios_sdks", []))
+    L += lista("Runtimes de iOS instalados (simuladores)", env.get("ios_runtimes", []))
+    L += lista("Simuladores iOS disponibles", env.get("ios_simuladores", []))
+    L += lista("Dispositivos iOS físicos conocidos por Xcode", env.get("ios_fisicos", []),
+               "_Ninguno (o `devicectl` no disponible: requiere Xcode 15+)._")
+    L += ["### Android Studio / SDK", ""]
+    L += lista("Componentes en `~/Library/Android/sdk`", env.get("android_sdk", []), "_Android SDK no encontrado._")
+    L += lista("Paquetes instalados (`sdkmanager --list_installed`)", env.get("android_sdk_instalado", []),
+               "_`sdkmanager` no disponible (instalar cmdline-tools)._")
+    L += lista("Emuladores (AVDs)", env.get("android_avds", []))
+    L += ["La configuración y los plugins de Android Studio se copian como `dotfile-config` "
+          "(`~/Library/Application Support/Google/AndroidStudio*`).", ""]
+
+    pg = data.get("postgres")
+    L += ["", f"## PostgreSQL (localhost:{PG_PUERTO})", ""]
+    if not pg or pg.get("error"):
+        L += [f"_{(pg or {}).get('error', 'No consultado')}._", ""]
+    else:
+        L += [f"- Versión: {md(pg['version'])}",
+              f"- Directorio de datos: `{md(pg['datadir'] or '(no visible: hace falta superusuario)')}`",
+              f"- Bases de datos: {len(pg['bases'])} · peso total {human(sum(b['bytes'] for b in pg['bases']))}", "",
+              "| Base de datos | Tamaño |", "|---|---|"]
+        L += [f"| `{md(b['nombre'])}` | {human(b['bytes'])} |" for b in pg["bases"]]
+        L += ["", "Los datos de PostgreSQL **no** se copian salvo que corras con `--dump-postgres`, que hace un "
+              "`pg_dump -Fc` por base y un `globales.sql` (roles) en `postgres/`. Para restaurar:", "",
+              "```bash",
+              "psql -h localhost -p 5432 -d postgres -f postgres/globales.sql      # roles primero",
+              "createdb -h localhost -p 5432 NOMBRE",
+              "pg_restore -h localhost -p 5432 -d NOMBRE postgres/NOMBRE.dump      # una base",
+              "```", ""]
+
     L += ["", "## Inventarios generados (carpeta `inventario/`)", ""]
     L += [f"- {f}" for f in data["inventario"]]
 
@@ -891,8 +1045,27 @@ def write_report(report_path, data):
           "7. Node/Python/Java: reinstalar versiones según `inventario/` (nvm, pyenv, sdkman/JDKs)",
           "8. Wi-Fi (si se exportaron las claves): `networksetup -addpreferredwirelessnetworkatindex en0 \"SSID\" 0 WPA2 \"clave\"`",
           "9. Navegadores: cerrar el navegador antes del paso 5; en Chrome/Brave/Edge iniciar sesión para sincronizar contraseñas",
-          "10. Extensiones VS Code: `cat inventario/vscode_extensiones.txt | cut -d@ -f1 | xargs -L1 code --install-extension`",
+          "10. PostgreSQL (si se usó `--dump-postgres`): ver la sección PostgreSQL de este reporte",
+          "11. Extensiones VS Code: `cat inventario/vscode_extensiones.txt | cut -d@ -f1 | xargs -L1 code --install-extension`",
           ""]
+    t = data.get("tamanos")
+    if t:
+        L += ["", "## Tamaño estimado del backup (`--calcular-tamano`)", "",
+              "| Concepto | Archivos | Tamaño |", "|---|---|---|"]
+        for m in t["por_motivo"]:
+            L.append(f"| {md(MOTIVOS_NOMBRE.get(m['motivo'], m['motivo']))} (`{m['motivo']}`) | {m['archivos']} | {human(m['bytes'])} |")
+        L.append(f"| Repos completos (`repo-pendiente`) | {len(t['repos'])} | {human(t['bytes_repos'])} |")
+        L.append(f"| **Total estimado** | | **{human(t['total'])}** |")
+        L += ["", f"- Omitidos por superar `--max-mb` (no incluidos arriba): {t['omitidos']['archivos']} archivos "
+                  f"({human(t['omitidos']['bytes'])})",
+              f"- Espacio libre en el destino (`{md(t['destino'])}`): {human(t['libre_destino'])} → "
+              + ("✅ alcanza" if t["libre_destino"] > t["total"] else "⚠️ NO alcanza"),
+              "- No incluye `inventario/`, `reporte.json`, `manifest.csv` ni `checksums.sha256` (pocos MB).",
+              "- Un repo dentro de `rutas_extra.txt` que además se copia completo se cuenta en ambas filas.", ""]
+        if t["repos"]:
+            L += ["### Repos completos más pesados", "", "| Repo | Tamaño |", "|---|---|"]
+            L += [f"| `{md(r['rel'])}` | {human(r['bytes'])} |" for r in t["repos"][:15]]
+            L.append("")
     report_path.write_text("\n".join(L), encoding="utf-8")
 
 
@@ -925,6 +1098,10 @@ def main():
     ap.add_argument("--yes", action="store_true", help="no pedir confirmación")
     ap.add_argument("--rutas", default=str(RUTAS_EXTRA), metavar="ARCHIVO",
                     help="lista de rutas extra a copiar tal cual (default: rutas_extra.txt junto al script)")
+    ap.add_argument("--dump-postgres", action="store_true",
+                    help="volcar las bases de PostgreSQL de localhost:5432 (una por una, pg_dump -Fc) a postgres/")
+    ap.add_argument("--calcular-tamano", action="store_true",
+                    help="agrega al final del reporte el tamaño estimado del backup por categoría")
     ap.add_argument("--wifi-claves", action="store_true",
                     help="exportar las claves de Wi-Fi del Llavero (macOS pide la contraseña por cada red)")
     ap.add_argument("--verificar", metavar="CARPETA",
@@ -965,6 +1142,10 @@ def main():
     if a.wifi_claves and redes:
         wifi_claves_n = exportar_wifi_claves(redes, dest / "inventario")
         inventario.append("wifi_claves.csv")
+    entorno = resumen_entorno(dest / "inventario", apps)
+    pg = postgres_5432()
+    print("   PostgreSQL :5432 -> " + (pg["error"] if pg.get("error") else
+          f"{len(pg['bases'])} bases ({human(sum(b['bytes'] for b in pg['bases']))})"))
     print(f"   {len(inventario)} archivos en inventario/ ({len(redes)} redes Wi-Fi)")
 
     print("[4/6] Escaneando carpetas (repos + archivos sensibles)...")
@@ -972,6 +1153,7 @@ def main():
     print(f"   {len(repo_paths)} repos, {len(sensibles)} archivos sensibles por patrón")
 
     print("[5/6] Analizando repos git...")
+    extras = rutas_extra(Path(a.rutas).expanduser())
     repos, plan, omitidos = [], {}, []
     for p in sensibles:
         plan[p] = "patron-sensible"
@@ -982,8 +1164,11 @@ def main():
         omitidos += omit
         for f in ign:
             plan.setdefault(f, "ignorado-git")
+        info["en_rutas_extra"] = any(e["existe"] and (rp == e["path"] or rp.is_relative_to(e["path"])) for e in extras)
         repos.append(info)
         flag = "⚠️ " if info["problemas"] else "✅"
+        if info["en_rutas_extra"]:
+            flag += "📌"
         print(f"   [{i}/{len(repo_paths)}] {flag} {info['rel']}  ->  {info['estado']}")
     for f in dotfile_paths():
         plan.setdefault(f, "dotfile-config")
@@ -991,7 +1176,6 @@ def main():
     for info in navegadores.values():
         for f in info["archivos"]:
             plan.setdefault(f, "navegador")
-    extras = rutas_extra(Path(a.rutas).expanduser())
     for e in extras:
         for f in e["archivos"]:
             plan[f] = "ruta-extra"  # sin límite de --max-mb: las pediste explícitamente
@@ -1006,7 +1190,27 @@ def main():
     bytes_archivos = sum(fsize(p) for p, m in plan.items() if m == "ruta-extra" or fsize(p) <= max_bytes)
     a_copiar_repos = [] if a.no_copiar_repos else [r for r in repos if r["copiar_completo"]]
     print("   calculando tamaño de repos pendientes...")
-    bytes_repos = sum(dir_size(Path(r["ruta"])) for r in a_copiar_repos)
+    tam_repos = [(r["rel"], dir_size(Path(r["ruta"]))) for r in a_copiar_repos]
+    bytes_repos = sum(b for _, b in tam_repos)
+    tamanos = None
+    if a.calcular_tamano:
+        print("   calculando tamaños por categoría...")
+        por, omit_n, omit_b = {}, 0, 0
+        for pth, mot in plan.items():
+            sz = fsize(pth)
+            if mot != "ruta-extra" and sz > max_bytes:
+                omit_n, omit_b = omit_n + 1, omit_b + sz
+                continue
+            d = por.setdefault(mot, [0, 0])
+            d[0], d[1] = d[0] + 1, d[1] + sz
+        tamanos = {
+            "por_motivo": [{"motivo": k, "archivos": v[0], "bytes": v[1]}
+                           for k, v in sorted(por.items(), key=lambda kv: -kv[1][1])],
+            "omitidos": {"archivos": omit_n, "bytes": omit_b},
+            "repos": [{"rel": r, "bytes": b} for r, b in sorted(tam_repos, key=lambda x: -x[1])],
+            "bytes_repos": bytes_repos, "total": bytes_archivos + bytes_repos,
+            "libre_destino": shutil.disk_usage(dest).free, "destino": str(dest),
+        }
 
     data = {
         "fecha": datetime.now().isoformat(timespec="seconds"),
@@ -1024,6 +1228,7 @@ def main():
                          "bytes": sum(fsize(f) for f in e["archivos"])} for e in extras],
         "historial_terminal": {"archivos": len(historial), "bytes": sum(fsize(f) for f in historial)},
         "wifi_redes": redes, "wifi_claves": wifi_claves_n,
+        "tamanos": tamanos, "entorno": entorno, "postgres": pg,
         "n_archivos": len(plan), "bytes_archivos": bytes_archivos, "bytes_repos": bytes_repos,
         "archivos": {str(k): v for k, v in sorted(plan.items(), key=lambda x: str(x[0]))},
     }
@@ -1037,12 +1242,20 @@ def main():
           f"sin remoto: {sum(1 for r in repos if not r['remotos'])}")
     print(f"Archivos a copiar: {len(plan)} ({human(bytes_archivos)}) — límite por archivo {human(max_bytes)}")
     print(f"Repos a copiar completos: {len(a_copiar_repos)} ({human(bytes_repos)})")
+    if tamanos:
+        print(f"Tamaño total estimado: {human(tamanos['total'])} | libre en destino: {human(tamanos['libre_destino'])}")
     if omitidos:
         print(f"Carpetas ignoradas omitidas por tamaño: {len(omitidos)} (ver el reporte)")
     print(f"Reporte: {report_path}")
 
+    if a.dump_postgres:
+        if pg.get("error"):
+            print(f"PostgreSQL: no se podrá volcar ({pg['error']})")
+        else:
+            print(f"PostgreSQL: se volcarán {len(pg['bases'])} bases una por una a postgres/ "
+                  f"(~{human(sum(b['bytes'] for b in pg['bases']))} en disco, comprimen con -Fc)")
     if a.solo_reporte:
-        print("\nModo --solo-reporte: no se copió nada.")
+        print("\nModo --solo-reporte: no se copió nada." + (" (--dump-postgres se ignora)" if a.dump_postgres else ""))
         return
     if not a.yes and input("\n¿Copiar archivos ahora? [s/N] ").strip().lower() not in ("s", "si", "sí", "y"):
         print("Cancelado. El reporte quedó generado.")
@@ -1069,6 +1282,12 @@ def main():
             manifest.append([str(src), str(dst), "", "repo-pendiente", f"PARCIAL: {len(e.args[0])} errores", ""])
         except Exception as e:
             manifest.append([str(src), str(dst), "", "repo-pendiente", f"ERROR: {e}", ""])
+
+    if a.dump_postgres and not pg.get("error"):
+        print("\n   Volcando PostgreSQL...")
+        total += volcar_postgres(dest, pg, manifest)
+    elif a.dump_postgres:
+        manifest.append(["postgres", "", "", "postgres-dump", f"ERROR: {pg['error']}", ""])
 
     with open(dest / "manifest.csv", "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)

@@ -28,6 +28,9 @@ python3 mac_backup.py --solo-reporte
 # Relevamiento + copia (por defecto en backup/backup_mac_<fecha>/; --dest para otro lado)
 python3 mac_backup.py --dest /ruta/destino
 
+# Agregar al final del reporte el tamaño estimado por categoría y el espacio libre en el destino
+python3 mac_backup.py --solo-reporte --calcular-tamano
+
 # Verificar la integridad de un backup ya hecho (checksums.sha256)
 python3 mac_backup.py --verificar backup/backup_mac_<fecha>
 
@@ -37,6 +40,8 @@ python3 mac_backup.py --solo-reporte --wifi-claves
 # Limitar el escaneo a ciertas carpetas (más rápido)
 python3 mac_backup.py --roots ~/Proyectos --solo-reporte
 ```
+
+El reporte consulta (solo lectura) las bases de PostgreSQL de `localhost:5432`; no modificar ni volcar datos ahí sin que el usuario lo pida.
 
 No hay tests, linter ni build. Requiere macOS y Python 3.9 o superior.
 
