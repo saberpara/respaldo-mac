@@ -45,6 +45,7 @@ python3 mac_backup.py --dest /Volumes/Externo/backup_mac --max-mb 100 --yes
 | `--max-mb` | `50` | Tamaño máximo por archivo; los más grandes se omiten y quedan en el manifest |
 | `--solo-reporte` | — | Genera el reporte y los inventarios sin copiar archivos |
 | `--no-copiar-repos` | — | No copia los repos pendientes completos |
+| `--rutas` | `rutas_extra.txt` junto al script | Archivo con las rutas extra a copiar tal cual (ver más abajo) |
 | `--wifi-claves` | — | Exporta las claves de las redes Wi-Fi guardadas a `inventario/wifi_claves.csv` (macOS pide la contraseña de admin o Touch ID por cada red) |
 | `--verificar CARPETA` | — | No hace backup: recalcula los checksums de un backup existente y avisa de archivos alterados o faltantes |
 | `--yes` | — | No pide confirmación antes de copiar |
@@ -123,6 +124,20 @@ La lista completa y las descripciones están en `SENSIBLES_INFO`, dentro de `mac
 - **Historial de terminal**: `.zsh_history`, `.zsh_sessions`, `.bash_history` y los de python, node, psql, mysql, sqlite, redis, irb, less, fish y atuin.
 - **Wi-Fi**: la lista de redes guardadas va siempre a `inventario/wifi_redes.txt`. Las **claves** solo con `--wifi-claves`, porque macOS pide autorización por cada red. El CSV queda en texto plano con permisos 600.
 
+### Rutas extra (`rutas_extra.txt`)
+Para copiar carpetas o archivos puntuales que el relevamiento no encuentra solo (documentos, fotos, notas, un disco de datos...), copiá `rutas_extra.example.txt` como `rutas_extra.txt` (queda ignorado por git) y poné una ruta por línea:
+
+```
+# comentarios con #
+~/Documents/contratos
+Proyectos/cliente-x        # relativa: cuenta desde ~
+/Volumes/Datos/fotos
+```
+
+- Se copian **tal cual** y **sin límite de tamaño** (`--max-mb` no aplica), con motivo `ruta-extra` en el manifest.
+- No se copian las carpetas que se regeneran (`node_modules`, `build`, `dist`, `venv`, `.venv`, `__pycache__`, `target`, `Pods`, `.gradle`, `.next`, `vendor`...; es `PRUNE_DIRS`). La carpeta `.git` **sí** se copia. Tampoco `.DS_Store` ni los symlinks.
+- El reporte lista cada ruta con su cantidad de archivos y tamaño, y avisa si alguna no existe.
+
 ### Archivos ignorados por git
 Todo lo que el `.gitignore` de cada repo deja afuera, **excepto** carpetas regenerables (`node_modules`, `build`, `dist`, `.gradle`, `venv`, `Pods`, `target`, `.next`, etc.) y basura (`.DS_Store`, `*.log`, `*.pyc`, `*.class`, `*.apk`…).
 Si una carpeta ignorada tiene más de 3000 archivos, no se copia y queda listada en el reporte para revisarla a mano.
@@ -146,7 +161,7 @@ backup_mac_YYYYMMDD_HHMM/
 └── repos_pendientes/     # repos sin remoto o con trabajo sin subir, completos con .git
 ```
 
-En `manifest.csv`, la columna `motivo` puede ser `patron-sensible`, `ignorado-git`, `dotfile-config`, `navegador`, `historial-terminal` o `repo-pendiente`. Cada archivo se copia y se compara su SHA-256 contra el original; si no coincide queda como `ERROR` en `resultado`.
+En `manifest.csv`, la columna `motivo` puede ser `patron-sensible`, `ignorado-git`, `dotfile-config`, `ruta-extra`, `navegador`, `historial-terminal` o `repo-pendiente`. Cada archivo se copia y se compara su SHA-256 contra el original; si no coincide queda como `ERROR` en `resultado`.
 
 ---
 

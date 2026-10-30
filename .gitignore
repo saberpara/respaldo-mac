@@ -9,6 +9,7 @@ reporte_*.md
 reporte.json
 manifest.csv
 checksums.sha256
+rutas_extra.txt
 verificacion_*.txt
 clonar_repos.sh
 inventario/

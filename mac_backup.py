@@ -39,6 +39,7 @@ from pathlib import Path
 
 HOME = Path.home().resolve()
 SCRIPT_DIR = Path(__file__).resolve().parent
+RUTAS_EXTRA = SCRIPT_DIR / "rutas_extra.txt"
 TS = datetime.now().strftime("%Y%m%d_%H%M")
 
 # Carpetas pesadas / regenerables: no se recorren ni se copian
@@ -556,6 +557,32 @@ def historial_paths():
     return dotfile_paths(HISTORIALES)
 
 
+def rutas_extra(archivo: Path):
+    """Lee la lista de rutas extra (una por línea, # comenta, ~ se expande; las relativas cuentan desde ~).
+    Se copian tal cual, salvo carpetas regenerables (node_modules, build, venv...; .git sí se copia) y .DS_Store.
+    Devuelve [{"ruta", "existe", "archivos"}]."""
+    if not archivo.is_file():
+        return []
+    prune = PRUNE_DIRS - {".git"}
+    out = []
+    for linea in archivo.read_text(encoding="utf-8").splitlines():
+        linea = linea.strip()
+        if not linea or linea.startswith("#"):
+            continue
+        p = Path(linea).expanduser()
+        p = p if p.is_absolute() else HOME / p
+        archivos = []
+        if p.is_file() and not p.is_symlink():
+            archivos.append(p)
+        elif p.is_dir():
+            for dp, dn, fn in os.walk(p):
+                dn[:] = [d for d in dn if d not in prune and not (Path(dp) / d).is_symlink()]
+                archivos += [Path(dp) / f for f in fn
+                             if f != ".DS_Store" and (Path(dp) / f).is_file() and not (Path(dp) / f).is_symlink()]
+        out.append({"ruta": linea, "existe": p.exists(), "archivos": archivos})
+    return out
+
+
 def _perfiles_chromium(base: Path):
     return [d for d in sorted(base.iterdir()) if d.is_dir() and (d.name == "Default" or d.name.startswith("Profile "))]
 
@@ -829,6 +856,16 @@ def write_report(report_path, data):
               "(macOS pide la contraseña de admin por cada red)."]
     L += [""]
 
+    L += ["## Rutas extra (`rutas_extra.txt`)", ""]
+    if data.get("rutas_extra"):
+        L += ["Se copian tal cual, sin límite de tamaño, salvo carpetas regenerables (node_modules, build, venv...).", "",
+              "| Ruta | Archivos | Tamaño |", "|---|---|---|"]
+        for e in data["rutas_extra"]:
+            L.append(f"| `{md(e['ruta'])}` | " + (f"{e['archivos']} | {human(e['bytes'])} |" if e["existe"] else "⚠️ no existe | — |"))
+        L.append("")
+    else:
+        L += ["_Sin rutas extra. Agregalas en `rutas_extra.txt` (una por línea)._", ""]
+
     if data["ignorados_omitidos"]:
         L += ["", "### Carpetas ignoradas NO copiadas (demasiados archivos, revisar a mano)", ""]
         L += [f"- `{rel_home(Path(p))}`" for p in data["ignorados_omitidos"]]
@@ -886,6 +923,8 @@ def main():
     ap.add_argument("--solo-reporte", action="store_true", help="solo relevamiento, no copia")
     ap.add_argument("--no-copiar-repos", action="store_true", help="no copiar repos pendientes completos")
     ap.add_argument("--yes", action="store_true", help="no pedir confirmación")
+    ap.add_argument("--rutas", default=str(RUTAS_EXTRA), metavar="ARCHIVO",
+                    help="lista de rutas extra a copiar tal cual (default: rutas_extra.txt junto al script)")
     ap.add_argument("--wifi-claves", action="store_true",
                     help="exportar las claves de Wi-Fi del Llavero (macOS pide la contraseña por cada red)")
     ap.add_argument("--verificar", metavar="CARPETA",
@@ -952,6 +991,11 @@ def main():
     for info in navegadores.values():
         for f in info["archivos"]:
             plan.setdefault(f, "navegador")
+    extras = rutas_extra(Path(a.rutas).expanduser())
+    for e in extras:
+        for f in e["archivos"]:
+            plan[f] = "ruta-extra"  # sin límite de --max-mb: las pediste explícitamente
+        print(f"   ruta extra {e['ruta']}: " + (f"{len(e['archivos'])} archivos" if e["existe"] else "NO EXISTE"))
     historial = historial_paths()
     for f in historial:
         plan.setdefault(f, "historial-terminal")
@@ -959,7 +1003,7 @@ def main():
     if abiertos:
         print(f"   ⚠️  Navegadores abiertos: {', '.join(abiertos)} (cerralos antes de copiar)")
 
-    bytes_archivos = sum(min(fsize(p), max_bytes + 1) for p in plan if fsize(p) <= max_bytes)
+    bytes_archivos = sum(fsize(p) for p, m in plan.items() if m == "ruta-extra" or fsize(p) <= max_bytes)
     a_copiar_repos = [] if a.no_copiar_repos else [r for r in repos if r["copiar_completo"]]
     print("   calculando tamaño de repos pendientes...")
     bytes_repos = sum(dir_size(Path(r["ruta"])) for r in a_copiar_repos)
@@ -976,6 +1020,8 @@ def main():
         "navegadores": [{"nombre": n, "perfiles": i["perfiles"], "archivos": len(i["archivos"]),
                          "bytes": sum(fsize(f) for f in i["archivos"])} for n, i in navegadores.items()],
         "navegadores_abiertos": abiertos,
+        "rutas_extra": [{"ruta": e["ruta"], "existe": e["existe"], "archivos": len(e["archivos"]),
+                         "bytes": sum(fsize(f) for f in e["archivos"])} for e in extras],
         "historial_terminal": {"archivos": len(historial), "bytes": sum(fsize(f) for f in historial)},
         "wifi_redes": redes, "wifi_claves": wifi_claves_n,
         "n_archivos": len(plan), "bytes_archivos": bytes_archivos, "bytes_repos": bytes_repos,
@@ -1007,7 +1053,7 @@ def main():
     files_root = dest / "archivos"
     total = 0
     for i, (src, motivo) in enumerate(sorted(plan.items(), key=lambda x: str(x[0])), 1):
-        total += copy_file(src, files_root, motivo, manifest, max_bytes)
+        total += copy_file(src, files_root, motivo, manifest, float("inf") if motivo == "ruta-extra" else max_bytes)
         if i % 500 == 0:
             print(f"   {i}/{len(plan)} archivos ({human(total)})", flush=True)
 

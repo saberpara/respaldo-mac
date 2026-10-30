@@ -1,0 +1,15 @@
+# Rutas extra a copiar tal cual en el backup (una por línea).
+# Copiá este archivo como rutas_extra.txt (queda ignorado por git) y editalo.
+#
+# - Las líneas que empiezan con # y las vacías se ignoran.
+# - Acepta archivos y carpetas. ~ se expande; las rutas relativas cuentan desde ~.
+# - Se copian completas, sin límite de tamaño (--max-mb no aplica acá).
+# - No se copian las carpetas que se regeneran: node_modules, build, dist, venv, .venv,
+#   __pycache__, target, Pods, .gradle, .next, vendor, etc. (la lista es PRUNE_DIRS en mac_backup.py).
+#   La carpeta .git sí se copia.
+#
+# Ejemplos:
+# ~/Documents/contratos
+# ~/Desktop/notas.txt
+# /Volumes/Datos/fotos_importantes
+# Proyectos/cliente-x

@@ -45,6 +45,7 @@ No hay tests, linter ni build. Requiere macOS y Python 3.9 o superior.
 - **Solo librería estándar.** No agregar dependencias externas.
 - Compatible con Python 3.9: evitar `match`, `X | Y` en type hints en runtime y otras sintaxis más nuevas.
 - Todo el texto de cara al usuario (mensajes, reporte, README, comentarios) está en **español rioplatense**. Mantenerlo así.
+- `rutas_extra.txt` (ignorado por git; plantilla en `rutas_extra.example.txt`) es la lista del usuario de rutas a copiar tal cual, sin límite de tamaño y sin las carpetas de `PRUNE_DIRS` (salvo `.git`). No commitear el archivo real.
 - Las listas configurables están al principio de `mac_backup.py` (`PRUNE_DIRS`, `HOME_PRUNE`, `SENSIBLES_INFO` (de ahí se deriva `SENSITIVE`; cada grupo lleva categoría y descripción para el reporte), `NOISE`, `DOTFILES`, `HISTORIALES`, `NAVEGADORES_CHROMIUM`, `FIREFOX_PERFIL`, `TOOLS`, `INVENTARIO_CMDS`). Para ampliar qué se releva o copia, editar esas constantes en vez de tocar la lógica.
 - Si se cambian opciones de CLI, constantes o la estructura de salida, actualizar `README.md` en el mismo cambio.
 
