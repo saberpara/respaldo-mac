@@ -457,7 +457,7 @@ def dotfile_paths():
     return out
 
 
-def write_report(dest, data):
+def write_report(report_path, data):
     L = [f"# Backup Mac — {data['fecha']}", "",
          f"- Equipo: **{data['equipo']}** · macOS {data['macos']} · usuario `{data['usuario']}`",
          f"- Raíces escaneadas: {', '.join(data['roots'])}", ""]
@@ -503,7 +503,7 @@ def write_report(dest, data):
           "7. Node/Python/Java: reinstalar versiones según `inventario/` (nvm, pyenv, sdkman/JDKs)",
           "8. Extensiones VS Code: `cat inventario/vscode_extensiones.txt | cut -d@ -f1 | xargs -L1 code --install-extension`",
           ""]
-    (dest / "REPORTE.md").write_text("\n".join(L), encoding="utf-8")
+    report_path.write_text("\n".join(L), encoding="utf-8")
 
 
 def write_clone_script(dest, repos):
@@ -595,7 +595,12 @@ def main():
         "n_archivos": len(plan), "bytes_archivos": bytes_archivos, "bytes_repos": bytes_repos,
         "archivos": {str(k): v for k, v in sorted(plan.items(), key=lambda x: str(x[0]))},
     }
-    write_report(dest, data)
+    if a.solo_reporte:
+        report_path = Path(__file__).resolve().parent / "reportes" / f"reporte_{TS}.md"
+    else:
+        report_path = dest / "REPORTE.md"
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    write_report(report_path, data)
     write_clone_script(dest, repos)
     (dest / "reporte.json").write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -606,7 +611,7 @@ def main():
     print(f"Repos a copiar completos: {len(a_copiar_repos)} ({human(bytes_repos)})")
     if omitidos:
         print(f"Carpetas ignoradas omitidas por tamaño: {len(omitidos)} (ver REPORTE.md)")
-    print(f"Reporte: {dest / 'REPORTE.md'}")
+    print(f"Reporte: {report_path}")
 
     if a.solo_reporte:
         print("\nModo --solo-reporte: no se copió nada.")

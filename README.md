@@ -43,7 +43,7 @@ python3 mac_backup.py --dest /Volumes/Externo/backup_mac --max-mb 100 --yes
 | `--roots` | `~` | Carpetas donde buscar repos y archivos sensibles |
 | `--exclude` | — | Carpetas a excluir del escaneo |
 | `--max-mb` | `50` | Tamaño máximo por archivo; los más grandes se omiten y quedan en el manifest |
-| `--solo-reporte` | — | Genera el reporte y los inventarios sin copiar archivos |
+| `--solo-reporte` | — | Genera el reporte y los inventarios sin copiar archivos. `REPORTE.md` se guarda en `reportes/reporte_YYYYMMDD_HHMM.md` dentro de la raíz del proyecto (junto a `mac_backup.py`) en vez de en `--dest` |
 | `--no-copiar-repos` | — | No copia los repos pendientes completos |
 | `--yes` | — | No pide confirmación antes de copiar |
 

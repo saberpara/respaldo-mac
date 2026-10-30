@@ -1,5 +1,6 @@
 # --- Salidas del backup (contienen secretos, NUNCA commitear) ---
 backup_mac_*/
+reportes/
 backup_mac_*.dmg
 *.dmg
 *.sparseimage
