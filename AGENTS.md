@@ -7,7 +7,7 @@ Contexto del proyecto para asistentes de IA. Es la fuente única de verdad; `CLA
 `mac_backup.py` es un script de Python que releva y respalda lo importante de una Mac antes de formatearla. Trabaja en dos fases:
 
 1. **Relevamiento**: apps, herramientas de desarrollo, estado de repos git, archivos sensibles e ignorados por git.
-2. **Copia** (con confirmación): arma una carpeta con el reporte, inventarios, un árbol espejo de archivos importantes y una copia completa de los repos con trabajo pendiente.
+2. **Copia** (con confirmación): arma una carpeta con el reporte, inventarios y un árbol espejo de archivos importantes. Los repos git no se copian: el reporte solo advierte los que tienen trabajo sin subir.
 
 Documentación de uso, opciones, estructura del backup y pasos de restauración: ver `README.md`.
 
@@ -56,7 +56,7 @@ No hay tests, linter ni build. Requiere macOS y Python 3.9 o superior.
 
 ## Seguridad (importante)
 
-- El backup generado contiene **claves privadas, tokens y secretos**. Nunca commitear sus salidas (`backup/`, `backup_mac_*/`, `reporte_*.md`, `reporte.json`, `manifest.csv`, `inventario/`, `archivos/`, `repos_pendientes/`, etc.); ya están en `.gitignore`, no quitarlas.
+- El backup generado contiene **claves privadas, tokens y secretos**. Nunca commitear sus salidas (`backup/`, `backup_mac_*/`, `reporte_*.md`, `reporte.json`, `manifest.csv`, `inventario/`, `archivos/`, `postgres/`, etc.); ya están en `.gitignore`, no quitarlas.
 - Al probar, no usar un `--dest` con datos reales dentro del repo ni pegar contenido del reporte en issues, commits o conversaciones.
 - El script **no debe modificar ni borrar** nada del origen: solo lee y copia. Mantener esa garantía.
 - No ejecutar la fase de copia sin que el usuario lo pida; para verificar cambios usar `--solo-reporte`.

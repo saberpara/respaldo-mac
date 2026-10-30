@@ -15,7 +15,6 @@ clonar_repos.sh
 postgres/
 inventario/
 archivos/
-repos_pendientes/
 
 # --- Por si se prueba con un --dest dentro del repo ---
 out/

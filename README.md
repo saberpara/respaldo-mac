@@ -5,7 +5,7 @@ Script en Python para **relevar y respaldar lo importante de una Mac antes de fo
 Trabaja en dos fases:
 
 1. **Relevamiento**: genera un reporte con las apps, las herramientas de desarrollo, el estado de los repos git y los archivos sensibles o ignorados por git.
-2. **Copia** (con confirmación): arma una carpeta con el reporte, los inventarios, un árbol espejo de los archivos importantes y una copia completa de los repos con trabajo pendiente.
+2. **Copia** (con confirmación): arma una carpeta con el reporte, los inventarios, un árbol espejo de los archivos importantes. Los repos con trabajo pendiente **no se copian**: el reporte solo avisa cuáles son para que los subas antes de formatear.
 
 ---
 
@@ -44,10 +44,9 @@ python3 mac_backup.py --dest /Volumes/Externo/backup_mac --max-mb 100 --yes
 | `--exclude` | — | Carpetas a excluir del escaneo |
 | `--max-mb` | `50` | Tamaño máximo por archivo; los más grandes se omiten y quedan en el manifest |
 | `--solo-reporte` | — | Genera el reporte y los inventarios sin copiar archivos |
-| `--no-copiar-repos` | — | No copia los repos pendientes completos |
 | `--rutas` | `rutas_extra.txt` junto al script | Archivo con las rutas extra a copiar tal cual (ver más abajo) |
 | `--dump-postgres` | — | Vuelca las bases de PostgreSQL de `localhost:5432` una por una (`pg_dump -Fc`) más los roles, en `postgres/` |
-| `--calcular-tamano` | — | Agrega al final del reporte el tamaño estimado del backup: por categoría, repos completos más pesados, total y si alcanza el espacio libre del destino |
+| `--calcular-tamano` | — | Agrega al final del reporte el tamaño estimado del backup: por categoría, total y si alcanza el espacio libre del destino |
 | `--wifi-claves` | — | Exporta las claves de las redes Wi-Fi guardadas a `inventario/wifi_claves.csv` (macOS pide la contraseña de admin o Touch ID por cada red) |
 | `--verificar CARPETA` | — | No hace backup: recalcula los checksums de un backup existente y avisa de archivos alterados o faltantes |
 | `--yes` | — | No pide confirmación antes de copiar |
@@ -93,6 +92,8 @@ createdb NOMBRE && pg_restore -d NOMBRE postgres/NOMBRE.dump      # cada base
 ```
 
 ### Repos git
+> Los repos **no se copian** (salvo los que estén dentro de `rutas_extra.txt`). El reporte solo **advierte** cuáles tienen trabajo que se perdería y el script lo repite al terminar. Subí los cambios antes de formatear.
+
 Para cada repo encontrado registra:
 - Remotos y rama actual
 - Archivos modificados sin commit y archivos sin trackear
@@ -123,7 +124,7 @@ Se buscan por nombre en todas las raíces, estén o no trackeados. El reporte in
 | Properties y Gradle | `*.properties`, `*.gradle`, `*.gradle.kts` |
 | Keystores de firma de apps | `*.keystore`, `*.jks` |
 | Certificados con clave privada (firma digital de PDF) | `*.p12`, `*.pfx`, `*.pkcs12` |
-| Claves privadas y accesos a servidores | `*.pem`, `*.key`, `*.ppk`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `id_dsa*` |
+| Claves privadas y accesos a servidores | `*.pem`, `*.key`, `*.ppk`, `*.pub`, `id_rsa*`, `id_ed25519*`, `id_ecdsa*`, `id_dsa*` |
 | Certificados públicos y firmas | `*.cer`, `*.crt`, `*.der`, `*.p7b`, `*.p7s`, `*.spc`, `*.csr`, `*.crl` |
 | Claves y firmas GPG/PGP | `*.gpg`, `*.pgp`, `*.asc`, `*.sig` |
 | Apple: provisioning y APNs | `*.mobileprovision`, `*.provisionprofile`, `*.p8` |
@@ -172,14 +173,14 @@ backup_mac_YYYYMMDD_HHMM/
 ├── reporte_YYYYMMDD_HHMM.md # resumen legible: repos, herramientas, apps, pasos de restauración
 ├── reporte.json          # todo el relevamiento en JSON
 ├── manifest.csv          # cada archivo: origen, destino, bytes, motivo, resultado, sha256
-├── checksums.sha256      # SHA-256 de archivos/ y repos_pendientes/ (para --verificar o `shasum -a 256 -c`)
+├── checksums.sha256      # SHA-256 de archivos/ y postgres/ (para --verificar o `shasum -a 256 -c`)
 ├── clonar_repos.sh       # git clone de los repos con remoto, en la misma ruta
 ├── inventario/           # Brewfile y listados de paquetes/versiones
 ├── archivos/             # árbol espejo relativo a ~ (rutas fuera de ~ van en _raiz/)
-└── repos_pendientes/     # repos sin remoto o con trabajo sin subir, completos con .git
+└── postgres/             # solo con --dump-postgres: un .dump por base + globales.sql
 ```
 
-En `manifest.csv`, la columna `motivo` puede ser `patron-sensible`, `ignorado-git`, `dotfile-config`, `ruta-extra`, `navegador`, `historial-terminal`, `postgres-dump` o `repo-pendiente`. Cada archivo se copia y se compara su SHA-256 contra el original; si no coincide queda como `ERROR` en `resultado`.
+En `manifest.csv`, la columna `motivo` puede ser `patron-sensible`, `ignorado-git`, `dotfile-config`, `ruta-extra`, `navegador`, `historial-terminal`, o `postgres-dump`. Cada archivo se copia y se compara su SHA-256 contra el original; si no coincide queda como `ERROR` en `resultado`.
 
 ---
 
@@ -191,7 +192,6 @@ python3 mac_backup.py --verificar /Volumes/Externo/backup_mac_YYYYMMDD_HHMM
 
 Recalcula el SHA-256 de cada archivo y lo compara con `checksums.sha256`. Si hay alterados o faltantes, los lista (y guarda el detalle en `verificacion_<fecha>.txt` dentro del backup) y termina con código 1. Conviene correrlo después de desconectar y volver a conectar el disco externo, así no lee desde la caché. También sirve `cd <backup> && shasum -a 256 -c checksums.sha256`.
 
-> Los repos de `repos_pendientes/` entran en `checksums.sha256` con el hash de lo que quedó en el destino, pero no se comparan contra el original al copiarlos.
 
 ---
 
@@ -209,27 +209,24 @@ brew bundle --file inventario/Brewfile
 # 3. Repos con remoto (misma ruta que antes)
 bash clonar_repos.sh
 
-# 4. Repos pendientes: copiarlos a su ruta original
-rsync -av repos_pendientes/ ~/
-
-# 5. Configs, .env, keystores y dotfiles encima de los repos clonados
+# 4. Configs, .env, keystores y dotfiles encima de los repos clonados
 rsync -av archivos/ ~/
 
-# 6. Permisos de SSH
+# 5. Permisos de SSH
 chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_*
 
-# 7. Extensiones de VS Code
+# 6. Extensiones de VS Code
 cut -d@ -f1 inventario/vscode_extensiones.txt | xargs -L1 code --install-extension
 
-# 8. Wi-Fi (si exportaste las claves con --wifi-claves)
+# 7. Wi-Fi (si exportaste las claves con --wifi-claves)
 networksetup -addpreferredwirelessnetworkatindex en0 "NOMBRE_RED" 0 WPA2 "clave"
 ```
 
-Los navegadores se restauran con el paso 5; cerralos antes. Para Chrome/Brave/Edge iniciá sesión para sincronizar las contraseñas.
+Los navegadores se restauran con el paso 4; cerralos antes. Para Chrome/Brave/Edge iniciá sesión para sincronizar las contraseñas.
 
 Después reinstalá las versiones de Node, Python y Java según `inventario/` (nvm, pyenv, sdkman/JDKs).
 
-> Conviene hacer el paso 5 **después** del 3 y el 4, así los `.env` y keystores caen dentro de los repos ya clonados.
+> Conviene hacer el paso 4 **después** del 3, así los `.env` y keystores caen dentro de los repos ya clonados.
 
 ---
 

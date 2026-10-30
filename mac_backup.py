@@ -12,7 +12,6 @@ FASE 1 (relevamiento):
     certificados, credenciales) + archivos IGNORADOS por git (excepto node_modules, build, etc.)
 FASE 2 (copia, previa confirmación):
   - archivos/          -> árbol espejo relativo a ~ (para restaurar con rsync)
-  - repos_pendientes/  -> copia completa (con .git) de repos sin remoto o con trabajo sin subir
   - inventario/, reporte_<fecha>.md, reporte.json, manifest.csv, checksums.sha256, clonar_repos.sh
 
   - También: perfiles de Chrome/Brave/Edge/Firefox, historial de terminal y redes Wi-Fi (claves con --wifi-claves)
@@ -74,10 +73,10 @@ SENSIBLES_INFO = [
     (("*.p12", "*.pfx", "*.pkcs12"), "Certificados con clave privada (firma digital)",
      "Contenedor PKCS#12 con certificado + clave privada, protegido por contraseña. Se usa para firma digital de PDF y "
      "documentos, certificados de cliente y firma de código (Apple/Windows)."),
-    (("*.pem", "*.key", "*.ppk", "*.pvk", "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*", "*_rsa", "*_ed25519"),
+    (("*.pem", "*.key", "*.ppk", "*.pvk", "*.pub", "id_rsa*", "id_ed25519*", "id_ecdsa*", "id_dsa*", "*_rsa", "*_ed25519"),
      "Claves privadas y accesos a servidores",
      "Claves SSH/TLS para entrar a servidores (VPS, EC2, GitHub), claves PuTTY y llaves de firma. "
-     "`id_*` también trae las `.pub` públicas."),
+     "`*.pub` son las claves públicas SSH (pueden traer algún falso positivo)."),
     (("*.cer", "*.crt", "*.cert", "*.der", "*.p7b", "*.p7c", "*.p7s", "*.spc", "*.csr", "*.crl"),
      "Certificados públicos y firmas",
      "Certificados X.509, cadenas de confianza, solicitudes (CSR) y firmas separadas (`.p7s`). Son parte de la firma "
@@ -283,17 +282,6 @@ def fsize(p):
         return p.stat().st_size
     except OSError:
         return 0
-
-
-def dir_size(p: Path):
-    total = 0
-    for dp, dn, fn in os.walk(p):
-        dn[:] = [d for d in dn if d not in PRUNE_DIRS or d == ".git"]
-        for f in fn:
-            fp = Path(dp) / f
-            if not fp.is_symlink():
-                total += fsize(fp)
-    return total
 
 
 def md(s):
@@ -508,9 +496,6 @@ def repo_info(repo: Path):
         "ramas_sin_upstream": ramas_sin_upstream,
         "problemas": problemas,
         "estado": "OK" if not problemas else "; ".join(problemas),
-        # se copia completo si no tiene remoto o hay trabajo que se perdería
-        "copiar_completo": bool(not remotes or modificados or sin_trackear or sin_push or stash
-                                or (remotes and ramas_sin_upstream)),
     }
 
 
@@ -716,10 +701,10 @@ def exportar_wifi_claves(redes, inv_dir: Path):
 
 
 def write_checksums(dest: Path, conocidos):
-    """Escribe checksums.sha256 (compatible con `shasum -a 256 -c`) de archivos/ y repos_pendientes/."""
+    """Escribe checksums.sha256 (compatible con `shasum -a 256 -c`) de archivos/ y postgres/."""
     n = 0
     with open(dest / "checksums.sha256", "w", encoding="utf-8") as fh:
-        for sub in ("archivos", "repos_pendientes", "postgres"):
+        for sub in ("archivos", "postgres"):
             base = dest / sub
             if not base.is_dir():
                 continue
@@ -879,13 +864,13 @@ def agrupar_repos(repos):
     ids |= {id(r) for r in otros}
     al_dia = [r for r in con if id(r) not in ids]
     return [
-        ("❌ Sin remoto", "Solo existen en esta Mac: si no se copian se pierden. Se copian completos a `repos_pendientes/`.",
+        ("❌ Sin remoto", "Solo existen en esta Mac: si no los subes a un remoto (o los incluyes en `rutas_extra.txt`) se pierden al formatear.",
          sin_remoto),
         ("⚠️ Con remoto, falta commit o push",
-         "Tienen cambios sin commit, archivos sin trackear o commits que no están en el remoto. Se copian completos a `repos_pendientes/`.",
+         "Tienen cambios sin commit, archivos sin trackear o commits que no están en el remoto. Haz commit y push antes de formatear (o incluye la ruta en `rutas_extra.txt`).",
          falta_commit_push),
         ("🔸 Con remoto, otros pendientes",
-         "Todo está subido, pero hay stashes, ramas sin upstream o con upstream borrado. Con stash o ramas sin upstream se copian a `repos_pendientes/`.",
+         "Todo está subido, pero hay stashes, ramas sin upstream o con upstream borrado. Revísalos antes de formatear.",
          otros),
         ("✅ Con remoto y al día", "Se recuperan con `clonar_repos.sh`; no hace falta copiarlos.", al_dia),
     ]
@@ -902,8 +887,6 @@ def write_report(report_path, data):
           f"- Repos git: {len(repos)} (" + ", ".join(
               f"{t.split(' ', 1)[1].lower()}: {len(g)}" for t, _, g in agrupar_repos(repos)) + ")",
           f"- Archivos a copiar: {data['n_archivos']} ({human(data['bytes_archivos'])})",
-          f"- Repos a copiar completos: {sum(1 for r in repos if r['copiar_completo'])} "
-          f"({human(data['bytes_repos'])})",
           f"- Archivos sensibles por patrón: {sum(g['cantidad'] for g in data['resumen_sensibles'])}", ""]
 
     L += ["## Archivos sensibles encontrados", "",
@@ -916,7 +899,9 @@ def write_report(report_path, data):
         L.append("| — | 0 | — | No se encontraron archivos sensibles por patrón |")
     L.append("")
 
-    L += ["## Repos git", ""]
+    L += ["## Repos git", "",
+          "> ⚠️ Los repos **no se copian** en el backup (solo los que estén dentro de `rutas_extra.txt`): "
+          "este reporte solo avisa cuáles tienen trabajo que se perdería. Súbelos antes de formatear.", ""]
     for titulo, desc, grupo in agrupar_repos(repos):
         cubiertos = sum(1 for r in grupo if r.get("en_rutas_extra"))
         L += [f"### {titulo} ({len(grupo)})", "", desc, ""]
@@ -1039,14 +1024,13 @@ def write_report(report_path, data):
           "1. Homebrew: `/bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\"`",
           "2. Paquetes y apps: `brew bundle --file inventario/Brewfile`",
           "3. Repos con remoto: `bash clonar_repos.sh`",
-          "4. Repos pendientes: copiar `repos_pendientes/<ruta>` a `~/<ruta>`",
-          "5. Configs/.env/keystores encima de los repos clonados: `rsync -av archivos/ ~/`",
-          "6. Permisos SSH: `chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_*`",
-          "7. Node/Python/Java: reinstalar versiones según `inventario/` (nvm, pyenv, sdkman/JDKs)",
-          "8. Wi-Fi (si se exportaron las claves): `networksetup -addpreferredwirelessnetworkatindex en0 \"SSID\" 0 WPA2 \"clave\"`",
-          "9. Navegadores: cerrar el navegador antes del paso 5; en Chrome/Brave/Edge iniciar sesión para sincronizar contraseñas",
-          "10. PostgreSQL (si se usó `--dump-postgres`): ver la sección PostgreSQL de este reporte",
-          "11. Extensiones VS Code: `cat inventario/vscode_extensiones.txt | cut -d@ -f1 | xargs -L1 code --install-extension`",
+          "4. Configs/.env/keystores encima de los repos clonados: `rsync -av archivos/ ~/`",
+          "5. Permisos SSH: `chmod 700 ~/.ssh && chmod 600 ~/.ssh/id_*`",
+          "6. Node/Python/Java: reinstalar versiones según `inventario/` (nvm, pyenv, sdkman/JDKs)",
+          "7. Wi-Fi (si se exportaron las claves): `networksetup -addpreferredwirelessnetworkatindex en0 \"SSID\" 0 WPA2 \"clave\"`",
+          "8. Navegadores: cerrar el navegador antes del paso 4; en Chrome/Brave/Edge iniciar sesión para sincronizar contraseñas",
+          "9. PostgreSQL (si se usó `--dump-postgres`): ver la sección PostgreSQL de este reporte",
+          "10. Extensiones VS Code: `cat inventario/vscode_extensiones.txt | cut -d@ -f1 | xargs -L1 code --install-extension`",
           ""]
     t = data.get("tamanos")
     if t:
@@ -1054,18 +1038,12 @@ def write_report(report_path, data):
               "| Concepto | Archivos | Tamaño |", "|---|---|---|"]
         for m in t["por_motivo"]:
             L.append(f"| {md(MOTIVOS_NOMBRE.get(m['motivo'], m['motivo']))} (`{m['motivo']}`) | {m['archivos']} | {human(m['bytes'])} |")
-        L.append(f"| Repos completos (`repo-pendiente`) | {len(t['repos'])} | {human(t['bytes_repos'])} |")
         L.append(f"| **Total estimado** | | **{human(t['total'])}** |")
         L += ["", f"- Omitidos por superar `--max-mb` (no incluidos arriba): {t['omitidos']['archivos']} archivos "
                   f"({human(t['omitidos']['bytes'])})",
               f"- Espacio libre en el destino (`{md(t['destino'])}`): {human(t['libre_destino'])} → "
               + ("✅ alcanza" if t["libre_destino"] > t["total"] else "⚠️ NO alcanza"),
-              "- No incluye `inventario/`, `reporte.json`, `manifest.csv` ni `checksums.sha256` (pocos MB).",
-              "- Un repo dentro de `rutas_extra.txt` que además se copia completo se cuenta en ambas filas.", ""]
-        if t["repos"]:
-            L += ["### Repos completos más pesados", "", "| Repo | Tamaño |", "|---|---|"]
-            L += [f"| `{md(r['rel'])}` | {human(r['bytes'])} |" for r in t["repos"][:15]]
-            L.append("")
+              "- No incluye `inventario/`, `reporte.json`, `manifest.csv` ni `checksums.sha256` (pocos MB).", ""]
     report_path.write_text("\n".join(L), encoding="utf-8")
 
 
@@ -1094,7 +1072,6 @@ def main():
     ap.add_argument("--exclude", nargs="*", default=[], help="carpetas a excluir")
     ap.add_argument("--max-mb", type=float, default=50, help="tamaño máximo por archivo (default 50 MB)")
     ap.add_argument("--solo-reporte", action="store_true", help="solo relevamiento, no copia")
-    ap.add_argument("--no-copiar-repos", action="store_true", help="no copiar repos pendientes completos")
     ap.add_argument("--yes", action="store_true", help="no pedir confirmación")
     ap.add_argument("--rutas", default=str(RUTAS_EXTRA), metavar="ARCHIVO",
                     help="lista de rutas extra a copiar tal cual (default: rutas_extra.txt junto al script)")
@@ -1188,10 +1165,6 @@ def main():
         print(f"   ⚠️  Navegadores abiertos: {', '.join(abiertos)} (cerralos antes de copiar)")
 
     bytes_archivos = sum(fsize(p) for p, m in plan.items() if m == "ruta-extra" or fsize(p) <= max_bytes)
-    a_copiar_repos = [] if a.no_copiar_repos else [r for r in repos if r["copiar_completo"]]
-    print("   calculando tamaño de repos pendientes...")
-    tam_repos = [(r["rel"], dir_size(Path(r["ruta"]))) for r in a_copiar_repos]
-    bytes_repos = sum(b for _, b in tam_repos)
     tamanos = None
     if a.calcular_tamano:
         print("   calculando tamaños por categoría...")
@@ -1207,8 +1180,7 @@ def main():
             "por_motivo": [{"motivo": k, "archivos": v[0], "bytes": v[1]}
                            for k, v in sorted(por.items(), key=lambda kv: -kv[1][1])],
             "omitidos": {"archivos": omit_n, "bytes": omit_b},
-            "repos": [{"rel": r, "bytes": b} for r, b in sorted(tam_repos, key=lambda x: -x[1])],
-            "bytes_repos": bytes_repos, "total": bytes_archivos + bytes_repos,
+            "total": bytes_archivos,
             "libre_destino": shutil.disk_usage(dest).free, "destino": str(dest),
         }
 
@@ -1229,7 +1201,7 @@ def main():
         "historial_terminal": {"archivos": len(historial), "bytes": sum(fsize(f) for f in historial)},
         "wifi_redes": redes, "wifi_claves": wifi_claves_n,
         "tamanos": tamanos, "entorno": entorno, "postgres": pg,
-        "n_archivos": len(plan), "bytes_archivos": bytes_archivos, "bytes_repos": bytes_repos,
+        "n_archivos": len(plan), "bytes_archivos": bytes_archivos,
         "archivos": {str(k): v for k, v in sorted(plan.items(), key=lambda x: str(x[0]))},
     }
     report_path = dest / f"reporte_{TS}.md"
@@ -1241,7 +1213,9 @@ def main():
     print(f"Repos: {len(repos)} | con pendientes: {sum(1 for r in repos if r['problemas'])} | "
           f"sin remoto: {sum(1 for r in repos if not r['remotos'])}")
     print(f"Archivos a copiar: {len(plan)} ({human(bytes_archivos)}) — límite por archivo {human(max_bytes)}")
-    print(f"Repos a copiar completos: {len(a_copiar_repos)} ({human(bytes_repos)})")
+    sin_subir = [r for r in repos if r["problemas"] and not r.get("en_rutas_extra")]
+    if sin_subir:
+        print(f"⚠️  {len(sin_subir)} repos con trabajo pendiente NO se copian (ver el reporte); súbelos antes de formatear.")
     if tamanos:
         print(f"Tamaño total estimado: {human(tamanos['total'])} | libre en destino: {human(tamanos['libre_destino'])}")
     if omitidos:
@@ -1270,19 +1244,6 @@ def main():
         if i % 500 == 0:
             print(f"   {i}/{len(plan)} archivos ({human(total)})", flush=True)
 
-    for r in a_copiar_repos:
-        src = Path(r["ruta"])
-        dst = dest / "repos_pendientes" / backup_rel(src)
-        print(f"   repo completo: {r['rel']}")
-        try:
-            shutil.copytree(src, dst, symlinks=True, dirs_exist_ok=True,
-                            ignore=shutil.ignore_patterns(*(PRUNE_DIRS - {".git"})))
-            manifest.append([str(src), str(dst), "", "repo-pendiente", "OK", ""])
-        except shutil.Error as e:
-            manifest.append([str(src), str(dst), "", "repo-pendiente", f"PARCIAL: {len(e.args[0])} errores", ""])
-        except Exception as e:
-            manifest.append([str(src), str(dst), "", "repo-pendiente", f"ERROR: {e}", ""])
-
     if a.dump_postgres and not pg.get("error"):
         print("\n   Volcando PostgreSQL...")
         total += volcar_postgres(dest, pg, manifest)
@@ -1299,7 +1260,7 @@ def main():
     print(f"   {n_hash} archivos en checksums.sha256")
 
     errores = sum(1 for m in manifest if not str(m[4]).startswith("OK"))
-    print(f"\nListo. Copiado {human(total)} en archivos/ + {len(a_copiar_repos)} repos completos.")
+    print(f"\nListo. Copiado {human(total)} en archivos/.")
     print(f"Omitidos/errores: {errores} (ver manifest.csv)")
     print(f'\nPara verificar la integridad (conviene tras volver a conectar el disco): python3 {Path(__file__).name} --verificar "{dest}"')
     print("\n⚠️  El backup contiene claves y secretos. Para guardarlo cifrado:")
